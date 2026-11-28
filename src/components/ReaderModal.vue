@@ -1,7 +1,6 @@
 <template>
   <!-- Reader Fullscreen Modal · 沉浸式：工具栏浮在画布上，默认自动隐藏 -->
   <div
-    ref="surfaceRef"
     v-show="!!reader.currentBook"
     class="reader-dismiss-layer reader-surface fixed inset-0 bg-[var(--md-reader-paper)] z-50 flex flex-col transition-colors duration-200"
     :data-reader-mode="theme.readerSurfaceMode"
@@ -132,7 +131,6 @@ import { useViewport } from '../composables/useViewport.ts';
 import { useShortcuts } from '../composables/useShortcuts.ts';
 import { useReaderBackDismiss } from '../composables/useReaderBackDismiss.ts';
 import { useVolumeKeys } from '../composables/useVolumeKeys.ts';
-import type { ReaderOpeningFrame } from '../services/readerTransition.ts';
 import type { Book } from '../types.ts';
 import MdIcon from './MdIcon.vue';
 import ReaderTopBar from './ReaderTopBar.vue';
@@ -145,16 +143,13 @@ import { useI18n } from '../composables/useI18n.ts';
 
 const props = defineProps({ opening: Boolean, nativePredictiveBackSupported: Boolean });
 const emit = defineEmits<{
-  'first-frame': [book: Book, ready: boolean, frame: ReaderOpeningFrame | null];
+  'first-frame': [book: Book, ready: boolean, cover: HTMLImageElement | null];
   'cancel-opening': [];
 }>();
 
 function onFirstFrame(book: Book, ready: boolean, cover: HTMLImageElement | null = null) {
   if (ready) reader.startReadingTime(book);
-  const surface = surfaceRef.value;
-  const firstPageIsCover = book.type === 'manga' && !book.customCoverBlob
-    && (!book.format || book.format === 'cbz' || book.format === 'pdf');
-  emit('first-frame', book, ready, surface ? { surface, cover, firstPageIsCover } : null);
+  emit('first-frame', book, ready, cover);
 }
 
 const isOpening = () => props.opening;
@@ -165,7 +160,6 @@ const reader = useReaderStore();
 const ui = useUiStore();
 const theme = useThemeStore();
 const { isCompact } = useViewport();
-const surfaceRef = shallowRef<HTMLElement | null>(null);
 const viewportRef = shallowRef<HTMLElement | null>(null);
 const {
   onPointerDown: onBackPointerDown,

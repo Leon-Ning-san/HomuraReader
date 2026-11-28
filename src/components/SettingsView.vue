@@ -347,11 +347,19 @@
     <section
       v-if="activeSection"
       class="settings-transition-layer"
-      :class="{ 'is-preparing': preparingDetail, 'is-settled': detailSettled }"
-      :style="detailInsets"
+      :class="{ 'is-opening': openingAnchor, 'is-settled': detailSettled }"
+      :style="isCompact ? undefined : detailInsets"
       :aria-label="t(sectionTitles[activeSection])"
     >
-      <div ref="clipRef" class="settings-transition-clip">
+      <div
+        ref="clipRef"
+        class="settings-transition-clip"
+        :style="openingAnchor ? {
+          '--settings-opening-clip': openingAnchor.clipPath,
+          '--settings-opening-inset': openingAnchor.inset,
+          '--settings-opening-radius': openingAnchor.radius
+        } : undefined"
+      >
         <div class="settings-transition-surround" aria-hidden="true"></div>
         <div ref="surfaceRef" class="settings-transition-surface" aria-hidden="true"></div>
         <div ref="detailRef" class="settings-page has-detail" :inert="returningDetail">
@@ -1217,7 +1225,7 @@ const logFilterOptions = [
 
 const emit = defineEmits(['detail-change']);
 const activeSection = ref<SettingsSection | null>(null);
-const preparingDetail = ref(false);
+const openingAnchor = shallowRef<ReturnType<typeof measureSettingsTransition>['anchor']>(null);
 const detailSettled = ref(false);
 const returningDetail = ref(false);
 const detailInsets = shallowRef<{ left: string; right: string }>();
@@ -1505,14 +1513,24 @@ function measureSection(section: SettingsSection) {
 function finishSectionMotion() {
   cancelAnimationFrame(measureFrame);
   measureFrame = 0;
-  motion?.destroy();
+  const transition = motion;
   motion = null;
-  preparingDetail.value = false;
+  const wasOpening = !!openingAnchor.value;
+  openingAnchor.value = null;
   returningDetail.value = false;
   backGestureActive = false;
   const previous = activeSection.value;
   const section = readSettingsSection(window.history.state);
   detailSettled.value = !!section;
+  if (wasOpening && section === previous && section) {
+    // 先让 Vue 落地可见状态，再释放仍覆盖全屏的动画末帧。
+    void nextTick(() => {
+      transition?.destroy();
+      if (!detailRef.value?.contains(document.activeElement)) {
+        backButtonRef.value?.button?.focus({ preventScroll: true });
+      }
+    });
+  } else transition?.destroy();
   if (section) {
     if (previous !== section) enterSection(section, false);
     return;
@@ -1527,24 +1545,25 @@ function finishSectionMotion() {
 }
 
 function startMotion(progress: number) {
-  if (motion || !clipRef.value || !surfaceRef.value || !detailRef.value || !anchor) return motion;
-  motion = createSettingsTransition(clipRef.value, surfaceRef.value, detailRef.value, anchor, progress, finishSectionMotion);
+  const origin = openingAnchor.value ?? anchor;
+  if (motion || !clipRef.value || !surfaceRef.value || !detailRef.value || !origin) return motion;
+  motion = createSettingsTransition(clipRef.value, surfaceRef.value, detailRef.value, origin, progress, finishSectionMotion, !!openingAnchor.value);
   return motion;
 }
 
 function enterSection(section: SettingsSection, animate: boolean) {
   if (!animate) measureSection(section);
-  preparingDetail.value = animate;
-  detailSettled.value = !animate;
+  openingAnchor.value = animate ? anchor : null;
+  detailSettled.value = !openingAnchor.value;
   activeSection.value = section;
   emit('detail-change', true);
   void nextTick(() => {
     if (activeSection.value !== section || readSettingsSection(window.history.state) !== section) return;
-    const transition = animate ? startMotion(1) : null;
-    preparingDetail.value = false;
-    if (transition) transition.playTo(0, finishSectionMotion);
-    else detailSettled.value = true;
-    backButtonRef.value?.button?.focus({ preventScroll: true });
+    if (openingAnchor.value) {
+      const transition = startMotion(1);
+      if (transition) transition.playTo(0, finishSectionMotion);
+      else finishSectionMotion();
+    } else backButtonRef.value?.button?.focus({ preventScroll: true });
   });
   if (section === 'storage' && !storageLoading.value) refreshStorage();
 }
@@ -1862,12 +1881,8 @@ onBeforeUnmount(() => {
 .settings-transition-layer {
   position: fixed;
   inset: 0;
-  z-index: 49;
+  z-index: var(--homura-z-settings-detail);
   isolation: isolate;
-}
-
-.settings-transition-layer.is-preparing {
-  visibility: hidden;
 }
 
 .settings-transition-clip,
@@ -1882,6 +1897,14 @@ onBeforeUnmount(() => {
   pointer-events: none;
 }
 
+.settings-transition-layer.is-opening .settings-transition-clip {
+  clip-path: var(--settings-opening-clip);
+}
+
+.settings-transition-layer.is-opening .settings-transition-surface {
+  opacity: 0;
+}
+
 .settings-transition-clip.is-morphing > .settings-transition-surface {
   clip-path: var(--settings-anchor-clip);
 }
@@ -1890,11 +1913,12 @@ onBeforeUnmount(() => {
   display: none;
 }
 
-.settings-transition-clip.is-morphing > .settings-transition-surround {
+.settings-transition-clip.is-morphing > .settings-transition-surround,
+.settings-transition-layer.is-opening .settings-transition-surround {
   display: block;
   position: absolute;
-  inset: var(--settings-anchor-inset);
-  border-radius: var(--settings-anchor-radius);
+  inset: var(--settings-opening-inset, var(--settings-anchor-inset));
+  border-radius: var(--settings-opening-radius, var(--settings-anchor-radius));
   outline: 150vmax solid var(--md-surface-low);
   pointer-events: none;
 }
@@ -1904,10 +1928,12 @@ onBeforeUnmount(() => {
   overscroll-behavior: contain;
   background: transparent;
   opacity: 0;
+  visibility: hidden;
 }
 
 .settings-transition-layer.is-settled .settings-transition-clip > .settings-page {
   opacity: 1;
+  visibility: visible;
 }
 
 .settings-topbar-inner {

@@ -1,6 +1,6 @@
 <template>
-  <div v-if="shown" class="rlp-paper reader-surface" :data-reader-mode="theme.readerSurfaceMode" aria-hidden="true">
-    <div ref="underlayEl" class="rlp-backdrop rlp-underlay"></div>
+  <div v-if="shown" ref="underlayEl" class="rlp-paper reader-surface" :data-reader-mode="theme.readerSurfaceMode" aria-hidden="true">
+    <div class="rlp-backdrop"></div>
   </div>
   <div
     v-if="shown"
@@ -10,7 +10,9 @@
     :data-reader-mode="theme.readerSurfaceMode"
     @wheel.prevent
   >
-    <div ref="backdropEl" class="rlp-backdrop"></div>
+    <div ref="backdropEl" class="rlp-entry-backdrop">
+      <div class="rlp-backdrop"></div>
+    </div>
     <div class="rlp-surface" :class="{ 'has-error': phase === 'error' }">
       <div v-if="phase !== 'error'" class="rlp-cover-stack">
         <div ref="shadowEl" class="rlp-cover-shadow"></div>
@@ -21,7 +23,7 @@
             <span class="rlp-art-title">{{ title }}</span>
           </template>
         </div>
-        <div ref="metaEl" class="rlp-meta">
+        <div ref="metaEl" class="rlp-meta" :class="{ 'is-visible': metaVisible }">
           <p class="rlp-title">{{ title }}</p>
           <p class="rlp-status font-mono" role="status">{{ t(status) }}</p>
           <div ref="barEl" class="rlp-bar" role="progressbar" :aria-label="t(status)" aria-valuenow="0">
@@ -70,6 +72,7 @@ const props = defineProps({
 const emit = defineEmits(['retry', 'cancel', 'relink', 'revealed']);
 const status = computed(() => props.rendering ? '正在准备首屏…' : '正在解析内容…');
 const shown = ref(false);
+const metaVisible = ref(false);
 const motion = ref<'waiting' | 'sprint' | 'clear' | 'expand'>('waiting');
 const rootEl = shallowRef<HTMLElement | null>(null);
 const backdropEl = shallowRef<HTMLElement | null>(null);
@@ -138,17 +141,17 @@ function finishReveal() {
 
 function clearLoadingContent() {
   progressFrame = undefined;
-  const layer = rootEl.value;
   const backdrop = backdropEl.value;
   const underlay = underlayEl.value;
   const face = coverEl.value;
   const shadow = shadowEl.value;
   const meta = metaEl.value;
   const frame = props.frame;
-  if (layer && backdrop && underlay && face && shadow && meta && frame) {
+  if (backdrop && underlay && face && shadow && meta && frame) {
     motion.value = 'clear';
     opening = playReaderOpening({
-      layer, backdrop, underlay, face, shadow, meta, frame,
+      backdrop, underlay, face, shadow, meta, frame,
+      flightFinished: flight?.finished,
       onExpand: () => {
         flight?.cancel();
         flight = null;
@@ -170,6 +173,11 @@ function paintProgress() {
 }
 
 function tickProgress(now: number) {
+  // 底排封面飞过文案区域时，等封面下沿让出空间后再显示文案。
+  if (!metaVisible.value && now - shownAt >= 110 && metaEl.value
+    && (!flight || flight.bottom <= metaEl.value.getBoundingClientRect().top)) {
+    metaVisible.value = true;
+  }
   if (props.reveal) {
     displayProgress = prefersReducedMotion() ? 100 : sprintReaderProgress(sprintFrom, Math.max(0, now - sprintAt));
   } else {
@@ -184,6 +192,7 @@ function tickProgress(now: number) {
 
 function startProgress() {
   motion.value = 'waiting';
+  metaVisible.value = prefersReducedMotion();
   displayProgress = lastAnnounced = 0;
   shownAt = lastFrame = performance.now();
   if (fillEl.value) fillEl.value.style.transform = 'scaleX(0)';
@@ -228,16 +237,24 @@ onBeforeUnmount(hide);
   z-index: 49;
   pointer-events: none;
   background: var(--md-reader-paper);
+  visibility: hidden;
 }
-.rlp-backdrop {
+.rlp-backdrop,
+.rlp-entry-backdrop {
   position: absolute;
   inset: 0;
+}
+.rlp-backdrop {
   background:
     radial-gradient(ellipse at center, color-mix(in oklab, var(--md-primary) 8%, transparent), transparent 62%),
     color-mix(in oklab, var(--md-reader-paper) 88%, var(--md-surface-low));
 }
-.rlp-underlay {
-  visibility: hidden;
+.rlp-entry-backdrop > .rlp-backdrop {
+  opacity: 0;
+  animation: rlp-backdrop-enter 140ms ease-out both;
+}
+@keyframes rlp-backdrop-enter {
+  to { opacity: 1; }
 }
 .rlp-surface {
   position: absolute;
@@ -313,9 +330,19 @@ onBeforeUnmount(hide);
   position: absolute;
   top: calc(100% + 24px);
   left: 50%;
-  transform: translateX(-50%);
+  opacity: 0;
+  transform: translate(-50%, 6px);
+  transition: opacity 140ms ease-out, transform 140ms ease-out;
   text-align: center;
   width: min(calc(100vw - 64px), 248px);
+}
+.rlp-meta.is-visible {
+  opacity: 1;
+  transform: translate(-50%, 0);
+}
+@media (prefers-reduced-motion: reduce) {
+  .rlp-entry-backdrop > .rlp-backdrop { animation: none; opacity: 1; }
+  .rlp-meta { transition: none; }
 }
 .rlp-title {
   font-size: 17px;

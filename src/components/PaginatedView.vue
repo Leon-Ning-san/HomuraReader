@@ -230,7 +230,7 @@ async function populateBufferSlot(slotIndex: number, pair: ReaderPage[], total: 
   if (!isManga.value) return true;
   const images = imgEls[slotIndex];
   const decode = async (image: HTMLImageElement, page: ReaderPage) => {
-    const decoded = await decodePageImage(image, page.itemRef as MangaPageItem);
+    const decoded = await decodePageImage(image, page.itemRef as MangaPageItem, { requireDecode: props.opening });
     return decoded && image.naturalWidth > 0;
   };
   if (vm.mode === 'single') return decode(images.single!, vm.single!);

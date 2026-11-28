@@ -6,7 +6,7 @@
   <div
     class="library-back-layer flex min-h-0"
     :class="{
-      'is-under-reader': !!reader.currentBook,
+      'is-under-reader': !!reader.currentBook && !readerOpening,
       'has-contained-shelf-scroll': containedShelfScroll,
       'has-contained-settings-scroll': containedSettingsScroll,
       'flex-1': !containedShelfScroll && !containedSettingsScroll
@@ -137,8 +137,10 @@
     @cancel="cancelReaderOpen"
     @revealed="finishReaderReveal"
   />
-  <div v-if="reader.currentBook" class="reader-back-scrim md-scrim" aria-hidden="true"></div>
-  <ReaderModal :opening="readerOpening" :native-predictive-back-supported="nativePredictiveBackSupported" @first-frame="onReaderFirstFrame" @cancel-opening="cancelReaderOpen" />
+  <div v-if="reader.currentBook && !readerOpening" class="reader-back-scrim md-scrim" aria-hidden="true"></div>
+  <div ref="readerRevealMask" class="reader-reveal-mask" :class="{ 'is-opening': readerOpening }">
+    <ReaderModal :opening="readerOpening" :native-predictive-back-supported="nativePredictiveBackSupported" @first-frame="onReaderFirstFrame" @cancel-opening="cancelReaderOpen" />
+  </div>
   <UpdateDialog
     v-if="isCompact"
     :open="updates.updateDialogOpen"
@@ -290,6 +292,7 @@ useScrollBounce(libraryScrollRef);
 const readerPhase = ref('shelf');
 const readerOpening = computed(() => readerPhase.value === 'loading' || readerPhase.value === 'reveal');
 const readerLoadingRef = shallowRef(null);
+const readerRevealMask = shallowRef(null);
 const readerLoadingBook = shallowRef(null);
 const readerOpeningFrame = shallowRef(null);
 const readerPreparing = ref(false);
@@ -380,13 +383,21 @@ function maybeRevealReader() {
   readerPhase.value = 'reveal';
 }
 
-function onReaderFirstFrame(book, ready, frame) {
+async function onReaderFirstFrame(book, ready, cover) {
   if (readerPhase.value !== 'loading' || readerLoadingError.value || book !== reader.currentBook) return;
   if (!ready || reader.openError) {
     failReaderOpen(reader.openError);
     return;
   }
-  readerOpeningFrame.value = frame;
+  const signal = readerOpenController?.signal;
+  if (!signal) return;
+  await waitForOpeningPaint(signal);
+  if (signal.aborted || readerPhase.value !== 'loading' || book !== reader.currentBook) return;
+  const mask = readerRevealMask.value;
+  if (!mask) return;
+  const knownCover = book.type === 'manga' && !book.customCoverBlob
+    && (!book.format || book.format === 'images' || book.format === 'cbz' || book.format === 'pdf');
+  readerOpeningFrame.value = { mask, cover, knownCover };
   maybeRevealReader();
 }
 

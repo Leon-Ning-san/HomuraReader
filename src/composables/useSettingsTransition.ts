@@ -7,6 +7,7 @@ const TIMELINE = 1000;
 const FULL_CLIP = 'inset(0px 0px 0px 0px round 0px)';
 const IDENTITY = 'translate3d(0px, 0px, 0px)';
 const SHAPE_EASE = 'cubic-bezier(0.35, 0.12, 0.45, 1)';
+const OPEN_SHAPE_EASE = 'cubic-bezier(0.55, 0, 0.65, 0.88)';
 
 export function measureSettingsTransition(page: HTMLElement, card: HTMLElement | null) {
   const column = page.closest<HTMLElement>('[data-app-scroll]') ?? page;
@@ -20,10 +21,11 @@ export function measureSettingsTransition(page: HTMLElement, card: HTMLElement |
   const x = Math.max(left, rect.left);
   const y = Math.max(0, rect.top);
   const endX = Math.min(right, rect.right);
-  const endY = Math.min(window.innerHeight, rect.bottom);
+  const viewportHeight = Math.max(window.innerHeight, document.documentElement.clientHeight);
+  const endY = Math.min(viewportHeight, rect.bottom);
   if (endX <= x || endY <= y) return { insets, anchor: null };
   const radius = `${parseFloat(getComputedStyle(card).borderTopLeftRadius) || 0}px`;
-  const inset = `${y}px ${right - endX}px ${window.innerHeight - endY}px ${x - left}px`;
+  const inset = `${y}px ${right - endX}px ${viewportHeight - endY}px ${x - left}px`;
   return {
     insets,
     anchor: {
@@ -40,13 +42,18 @@ export function createSettingsTransition(
   detail: HTMLElement,
   anchor: NonNullable<ReturnType<typeof measureSettingsTransition>['anchor']>,
   initialProgress: number,
-  onInterrupted: () => void
+  onInterrupted: () => void,
+  opening = false
 ) {
   if (prefersReducedMotion() || typeof clip.animate !== 'function'
     || !CSS.supports('clip-path', anchor.clipPath)) return null;
   const animations: Animation[] = [];
   let settlement = 0;
   let disposed = false;
+
+  function timelinePosition(position: number) {
+    return opening ? 1 - position : position;
+  }
 
   function add(element: HTMLElement, frames: Keyframe[]) {
     const animation = element.animate(frames, { duration: TIMELINE, fill: 'both' });
@@ -55,35 +62,50 @@ export function createSettingsTransition(
       if (!disposed) onInterrupted();
     });
     animation.pause();
-    animation.currentTime = initialProgress * TIMELINE;
+    animation.currentTime = timelinePosition(initialProgress) * TIMELINE;
   }
 
   function destroy() {
     disposed = true;
     for (const animation of animations) animation.cancel();
-    clip.classList.remove('is-morphing');
-    clip.style.removeProperty('--settings-anchor-clip');
-    clip.style.removeProperty('--settings-anchor-inset');
-    clip.style.removeProperty('--settings-anchor-radius');
+    if (!opening) {
+      clip.classList.remove('is-morphing');
+      clip.style.removeProperty('--settings-anchor-clip');
+      clip.style.removeProperty('--settings-anchor-inset');
+      clip.style.removeProperty('--settings-anchor-radius');
+    }
   }
 
   try {
-    // 只在入口卡片的原位置透出概览，其余收缩区域保持不透明。
-    clip.style.setProperty('--settings-anchor-clip', anchor.clipPath);
-    clip.style.setProperty('--settings-anchor-inset', anchor.inset);
-    clip.style.setProperty('--settings-anchor-radius', anchor.radius);
-    clip.classList.add('is-morphing');
-    add(clip, [{ clipPath: FULL_CLIP, easing: SHAPE_EASE }, { clipPath: anchor.clipPath }]);
-    // 入口先于详情完全淡出时开始显现，仅在入口区域短暂交叠。
-    add(surface, [
+    if (!opening) {
+      // 只在入口卡片的原位置透出概览，其余收缩区域保持不透明。
+      clip.style.setProperty('--settings-anchor-clip', anchor.clipPath);
+      clip.style.setProperty('--settings-anchor-inset', anchor.inset);
+      clip.style.setProperty('--settings-anchor-radius', anchor.radius);
+      clip.classList.add('is-morphing');
+    }
+    // 让进场效果自身的第 0 帧对应挂载状态，避免合成线程先采样全屏末帧。
+    add(clip, opening ? [
+      { clipPath: anchor.clipPath, easing: OPEN_SHAPE_EASE, offset: 0 },
+      { clipPath: FULL_CLIP, offset: 0.94 }, { clipPath: FULL_CLIP, offset: 1 }
+    ] : [{ clipPath: FULL_CLIP, easing: SHAPE_EASE }, { clipPath: anchor.clipPath }]);
+    add(surface, opening ? [
+      { opacity: 0, offset: 0 }, { opacity: 1, offset: 0.35 }, { opacity: 1, offset: 1 }
+    ] : [
       { opacity: 1, offset: 0 }, { opacity: 1, offset: 0.32 }, { opacity: 0.52, offset: 0.365 },
       { opacity: 0, offset: 0.8 }, { opacity: 0, offset: 1 }
     ]);
-    add(detail, [
+    add(detail, opening ? [
+      { opacity: 0, visibility: 'hidden', offset: 0 }, { opacity: 0, visibility: 'hidden', offset: 0.35 },
+      { opacity: 1, visibility: 'visible', offset: 0.82 }, { opacity: 1, visibility: 'visible', offset: 1 }
+    ] : [
       { opacity: 1, offset: 0 }, { opacity: 1, offset: 0.04 },
       { opacity: 0.3, offset: 0.3 }, { opacity: 0, offset: 0.35 }, { opacity: 0, offset: 1 }
     ]);
-    add(detail, [
+    add(detail, opening ? [
+      { transform: anchor.transform, offset: 0, easing: OPEN_SHAPE_EASE },
+      { transform: IDENTITY, offset: 0.96 }, { transform: IDENTITY, offset: 1 }
+    ] : [
       { transform: IDENTITY, offset: 0 },
       { transform: IDENTITY, offset: 0.04, easing: SHAPE_EASE },
       { transform: anchor.transform, offset: 1 }
@@ -94,11 +116,11 @@ export function createSettingsTransition(
   }
 
   function progress() {
-    return Number(animations[0].currentTime ?? 0) / TIMELINE;
+    return timelinePosition(Number(animations[0].currentTime ?? 0) / TIMELINE);
   }
 
   function seek(position: number) {
-    for (const animation of animations) animation.currentTime = position * TIMELINE;
+    for (const animation of animations) animation.currentTime = timelinePosition(position) * TIMELINE;
   }
 
   return {
@@ -121,9 +143,9 @@ export function createSettingsTransition(
         return;
       }
       const duration = settleDuration ?? Math.abs(distance) * (target === 0 ? 380 : 280);
-      const rate = distance * TIMELINE / duration;
+      const start = timelinePosition(position) * TIMELINE;
+      const rate = (timelinePosition(target) * TIMELINE - start) / duration;
       try {
-        const start = position * TIMELINE;
         const now = document.timeline.currentTime;
         for (const animation of animations) {
           animation.playbackRate = rate;

@@ -7,7 +7,10 @@ import { JSDOM } from 'jsdom';
 import { parse, compileScript } from '@vue/compiler-sfc';
 import { transform } from 'esbuild';
 
-const { window } = new JSDOM('<meta id="homuraThemeColor"><div id="app"></div>', { url: 'http://localhost/' });
+const { window } = new JSDOM('<meta id="homuraThemeColor"><div id="app"></div>', {
+  url: 'http://localhost/',
+  pretendToBeVisual: true
+});
 Object.assign(globalThis, {
   window, document: window.document, localStorage: window.localStorage,
   Element: window.Element, HTMLElement: window.HTMLElement, SVGElement: window.SVGElement,
@@ -166,7 +169,7 @@ test('真正满格后才清场，取消后不再绘制或触发旧揭幕', () =>
     props.visible = true;
     await nextTick();
     await paintFrame();
-    props.frame = { surface, cover: null, firstPageIsCover: false };
+    props.frame = { mask: surface, cover: null, knownCover: false };
     props.reveal = true;
     props.visible = false;
     await nextTick();
@@ -234,3 +237,51 @@ test('飞行封面独占绘制，落位或取消时同步交还两端', async ()
     layer.remove();
   }
 });
+
+test('展开终点实际绘制后才交接加载层', () => fixture(async ({ props }) => {
+  const mask = document.createElement('div');
+  const readerImage = document.createElement('img');
+  mask.append(readerImage);
+  document.body.append(mask);
+  const rect = (left, top, width, height) => new window.DOMRect(left, top, width, height);
+  mask.getBoundingClientRect = () => rect(0, 0, 400, 800);
+  const originalAnimate = window.HTMLElement.prototype.animate;
+  const animations = [];
+  window.HTMLElement.prototype.animate = function (keyframes, timing) {
+    assert.equal(timing.fill, 'both');
+    let finish;
+    const finished = new Promise(resolve => { finish = resolve; });
+    const animation = { element: this, keyframes, finished, finish, cancel: finish };
+    animations.push(animation);
+    return animation;
+  };
+  try {
+    props.visible = true;
+    await nextTick();
+    document.querySelector('.rlp-cover').getBoundingClientRect = () => rect(120, 280, 160, 240);
+    props.frame = { mask, cover: null, knownCover: false };
+    props.reveal = true;
+    props.visible = false;
+    await nextTick();
+    await paintFrame(110);
+    await paintFrame();
+    assert.equal(animations.length, 1);
+    animations[0].finish();
+    await new Promise(setImmediate);
+    const clip = animations.find(animation => animation.element === mask);
+    assert.equal(clip.keyframes.at(-1).clipPath, 'inset(0px round 0px)');
+    await paintFrame(375);
+    assert.ok(document.querySelector('.rlp-root'));
+    animations.forEach(animation => animation.finish());
+    await new Promise(setImmediate);
+    await paintFrame();
+    assert.ok(document.querySelector('.rlp-root'));
+    await paintFrame();
+    await nextTick();
+    assert.equal(document.querySelector('.rlp-root'), null);
+    assert.equal(mask.firstElementChild, readerImage);
+  } finally {
+    mask.remove();
+    window.HTMLElement.prototype.animate = originalAnimate;
+  }
+}));

@@ -42,7 +42,7 @@ function fixture(run, { reduced = false, clipSupported = true } = {}) {
 
   const [clip, surface, content] = Array.from({ length: 3 }, () => Object.assign(document.createElement('div'), { animate }));
   let interrupted = 0;
-  const setup = progress => createSettingsTransition(clip, surface, content, measureSettingsTransition(page, card).anchor, progress, () => { interrupted++; });
+  const setup = (progress, opening) => createSettingsTransition(clip, surface, content, measureSettingsTransition(page, card).anchor, progress, () => { interrupted++; }, opening);
   return Promise.resolve(run({ page, card, clip, effects, setup, interrupted: () => interrupted })).finally(() => window.close());
 }
 
@@ -59,6 +59,30 @@ test('卡片落点相对于主栏裁切，屏外入口没有可动画的区域',
   assert.equal(measureSettingsTransition(page, card).anchor.clipPath, 'inset(0px 580px 750px 0px round 28px)');
   card.getBoundingClientRect = () => ({ left: 240, right: 620, top: -180, bottom: -10 });
   assert.equal(measureSettingsTransition(page, card).anchor, null);
+}));
+
+test('打开时先以实色表面盖住入口，35% 后才淡入详情', () => fixture(({ setup, clip, effects }) => {
+  const transition = setup(1, true);
+  assert.ok(!clip.classList.contains('is-morphing'));
+  assert.ok(effects.every(animation => animation.options.fill === 'both' && animation.currentTime === 0));
+  assert.equal(effects[0].keyframes[0].clipPath, 'inset(200px 580px 240px 20px round 28px)');
+  assert.deepEqual(effects[0].keyframes.slice(1), [
+    { clipPath: 'inset(0px 0px 0px 0px round 0px)', offset: 0.94 },
+    { clipPath: 'inset(0px 0px 0px 0px round 0px)', offset: 1 }
+  ]);
+  assert.deepEqual(effects[1].keyframes, [
+    { opacity: 0, offset: 0 }, { opacity: 1, offset: 0.35 }, { opacity: 1, offset: 1 }
+  ]);
+  assert.deepEqual(effects[2].keyframes, [
+    { opacity: 0, visibility: 'hidden', offset: 0 }, { opacity: 0, visibility: 'hidden', offset: 0.35 },
+    { opacity: 1, visibility: 'visible', offset: 0.82 }, { opacity: 1, visibility: 'visible', offset: 1 }
+  ]);
+  transition.playTo(0, () => {});
+  assert.ok(effects.every(animation => animation.playbackRate > 0));
+  transition.seek(0.75);
+  assert.ok(effects.every(animation => animation.currentTime === 250));
+  assert.equal(transition.pause(), 0.75);
+  transition.destroy();
 }));
 
 test('关闭分段淡出真实详情和表面，反向播放使用同一组关键帧', () => fixture(async ({ setup, clip, effects, interrupted }) => {

@@ -191,7 +191,7 @@ export function releaseBookPageUrls(book: Book) {
   ((book.pageItems || []) as unknown as MangaPageItem[]).forEach((item) => releasePageItemUrl(book, item));
 }
 
-export async function decodeImgIntoElement(imgEl: HTMLImageElement, url: string, pageObj: MangaPageItem | null | undefined, options: { preserveSrcOnEmpty?: boolean; [key: string]: unknown } = {}) {
+export async function decodeImgIntoElement(imgEl: HTMLImageElement, url: string, pageObj: MangaPageItem | null | undefined, options: { preserveSrcOnEmpty?: boolean; requireDecode?: boolean; [key: string]: unknown } = {}) {
   if (!imgEl) return false;
   if (!url) {
     // 复用的翻页槽位需要清掉旧页；条漫的 img 是每页独占的，
@@ -202,12 +202,15 @@ export async function decodeImgIntoElement(imgEl: HTMLImageElement, url: string,
     }
     return false;
   }
-  if (imgEl.getAttribute('data-current-src') === url) {
+  const sameSource = imgEl.getAttribute('data-current-src') === url;
+  if (sameSource && !options.requireDecode) {
     if (pageObj?.urlIsAsset) nativeAssetFailureStreak = 0;
     return true;
   }
-  imgEl.src = url;
-  imgEl.setAttribute('data-current-src', url);
+  if (!sameSource) {
+    imgEl.src = url;
+    imgEl.setAttribute('data-current-src', url);
+  }
   if (imgEl.decode) {
     try {
       await imgEl.decode();

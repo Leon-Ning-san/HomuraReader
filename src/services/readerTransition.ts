@@ -10,6 +10,8 @@ export const READER_OPEN_SPRINT_MS = 105;
 export const READER_OPEN_FAST_MS = 80;
 export const READER_OPEN_CLEAR_MS = 108;
 const EXPAND_MS = 450;
+const OPEN_WATCHDOG_MS = 1500;
+const FULL_CLIP = 'inset(0px round 0px)';
 
 export function advanceReaderProgress(display: number, rendering: boolean, dt: number, trickle: boolean) {
   const stageTarget = rendering ? 68 : 28;
@@ -25,9 +27,9 @@ export function sprintReaderProgress(from: number, elapsed: number) {
 }
 
 export interface ReaderOpeningFrame {
-  surface: HTMLElement;
+  mask: HTMLElement;
   cover: HTMLImageElement | null;
-  firstPageIsCover: boolean;
+  knownCover: boolean;
 }
 
 export function waitForOpeningPaint(signal: AbortSignal) {
@@ -52,9 +54,9 @@ export async function decodeVisibleReaderImages(content: HTMLElement, viewport: 
     return rect.bottom > bounds.top && rect.top < bounds.bottom
       && rect.right > bounds.left && rect.left < bounds.right;
   });
-  await Promise.allSettled(visible.map(image => {
+  await Promise.allSettled(visible.map(async image => {
     image.loading = 'eager';
-    return image.decode();
+    await image.decode?.();
   }));
 }
 
@@ -127,6 +129,7 @@ export function playShelfToReaderSplash(source: HTMLElement, target: HTMLElement
     // 落位和静态封面交接在同一次 DOM 更新中完成。
     finished: movement.finished.then(finish, () => {}),
     cancel: finish,
+    get bottom() { return flight.getBoundingClientRect().bottom; },
     settleWithin(duration: number) {
       const remaining = timing.duration - Number(movement.currentTime || 0);
       if (remaining <= duration) return;
@@ -186,43 +189,30 @@ function sharedCover(target: HTMLImageElement, bounds: DOMRect) {
   const rect = new DOMRect(box.left + xInset, box.top + yInset, width, height);
   if (rect.top < viewport.top - 0.5 || rect.bottom > viewport.bottom + 0.5
     || rect.left < viewport.left - 0.5 || rect.right > viewport.right + 0.5) return null;
-  return { target, box, rect, style };
+  return { target, rect, style };
 }
 
 export function playReaderOpening({
-  layer, backdrop, underlay, face, shadow, meta, frame, onExpand, onFinish
+  backdrop, underlay, face, shadow, meta, frame, flightFinished, onExpand, onFinish
 }: {
-  layer: HTMLElement;
   backdrop: HTMLElement;
   underlay: HTMLElement;
   face: HTMLElement;
   shadow: HTMLElement;
   meta: HTMLElement;
   frame: ReaderOpeningFrame;
+  flightFinished?: Promise<void>;
   onExpand: () => void;
   onFinish: () => void;
 }) {
-  if (!frame.surface.isConnected || typeof meta.animate !== 'function' || prefersReducedMotion()) return null;
+  const { mask, cover: target } = frame;
+  if (!mask.isConnected || typeof meta.animate !== 'function' || prefersReducedMotion()) return null;
   const animations: Animation[] = [];
   const restore: Array<() => void> = [];
-  let stopped = false;
-  const source = face.querySelector('img');
-  const target = frame.cover;
-  const coverUrl = target?.currentSrc || target?.src || '';
-  const checkNativeCover = !frame.firstPageIsCover && /^(asset:\/\/|https?:\/\/asset\.)localhost\//.test(coverUrl);
-  const coverCopy = source && target && (checkNativeCover || matchCover(source, target, frame.firstPageIsCover))
-    ? new Image() : null;
-  let coverLayer: HTMLDivElement | undefined;
-  let coverReady = false;
-  if (coverCopy) {
-    // 原生页图默认不用 CORS。比对时单独复用 asset 协议的跨源响应，保留阅读页原来的图片加载方式。
-    if (checkNativeCover) coverCopy.crossOrigin = 'anonymous';
-    coverCopy.src = coverUrl;
-    coverCopy.alt = '';
-    void coverCopy.decode().then(() => {
-      if (!stopped) coverReady = !checkNativeCover || !!(source && matchCover(source, coverCopy, false));
-    }, () => {});
-  }
+  const paint = new AbortController();
+  let releaseWaits!: () => void;
+  const interrupted = new Promise<void>(resolve => { releaseWaits = resolve; });
+  let forced = false;
 
   function setStyle(element: HTMLElement, property: string, value: string) {
     const original = element.style.getPropertyValue(property);
@@ -230,105 +220,127 @@ export function playReaderOpening({
     restore.push(() => element.style.setProperty(property, original));
   }
 
-  function animate(element: HTMLElement, keyframes: Keyframe[], duration = EXPAND_MS, easing = OPEN_EASE) {
-    const animation = element.animate(keyframes, { duration, easing, fill: 'both' });
+  function animate(element: HTMLElement, keyframes: Keyframe[], duration = EXPAND_MS) {
+    const animation = element.animate(keyframes, { duration: forced ? 0 : duration, easing: OPEN_EASE, fill: 'both' });
     animation.finished.catch(() => {});
     animations.push(animation);
     return animation;
   }
 
+  function forceEnd() {
+    forced = true;
+    for (const animation of animations) animation.finish();
+    releaseWaits();
+  }
+
+  const timer = window.setTimeout(forceEnd, OPEN_WATCHDOG_MS);
+  window.addEventListener('resize', forceEnd, { once: true });
+
   function stop() {
-    if (stopped) return;
-    stopped = true;
-    window.removeEventListener('resize', finish);
+    if (paint.signal.aborted) return;
+    paint.abort();
+    releaseWaits();
+    window.clearTimeout(timer);
+    window.removeEventListener('resize', forceEnd);
     animations.forEach(animation => animation.cancel());
     restore.reverse().forEach(reset => reset());
-    coverLayer?.remove();
   }
 
-  function finish() {
-    if (stopped) return;
-    onFinish();
-    stop();
+  async function prepareCover() {
+    const source = face.querySelector('img');
+    if (!source || !target?.naturalWidth) return null;
+    try {
+      if (!source.naturalWidth) await source.decode();
+      const url = target.currentSrc || target.src;
+      const checkNativeCover = !frame.knownCover && /^(asset:\/\/|https?:\/\/asset\.)localhost\//.test(url);
+      if (!checkNativeCover && !matchCover(source, target, frame.knownCover)) return null;
+      const copy = new Image();
+      // asset 页图平时不请求 CORS。仅在需要像素比对时请求可读副本。
+      if (checkNativeCover) copy.crossOrigin = 'anonymous';
+      copy.src = url;
+      await copy.decode();
+      return !checkNativeCover || matchCover(source, copy, false) ? copy : null;
+    } catch {
+      return null;
+    }
   }
 
-  function expand() {
-    if (stopped) return;
-    const surface = frame.surface;
-    const bounds = surface.getBoundingClientRect();
-    const layerBounds = layer.getBoundingClientRect();
+  async function run() {
+    const metaStyle = getComputedStyle(meta);
+    const clear = animate(meta, [
+      { opacity: metaStyle.opacity, transform: metaStyle.transform },
+      { opacity: 0, transform: 'translate(-50%, 7px)' }
+    ], READER_OPEN_CLEAR_MS);
+    const [copy] = await Promise.race([
+      Promise.all([prepareCover(), clear.finished, flightFinished]),
+      interrupted.then(() => [null] as const)
+    ]);
+    if (paint.signal.aborted) return;
+
+    onExpand();
+    const bounds = mask.getBoundingClientRect();
     const from = face.getBoundingClientRect();
-    if (!surface.isConnected || !from.width || !from.height || !bounds.width || !bounds.height) {
-      finish();
+    if (!from.width || !from.height || !bounds.width || !bounds.height || !mask.isConnected) {
+      setStyle(mask, 'clip-path', FULL_CLIP);
+      await waitForOpeningPaint(paint.signal);
+      if (!paint.signal.aborted) onFinish();
       return;
     }
 
-    // 仅在清场结束后读取一次起落点。纸面始终在下方，阅读视图从封面边界向外揭开。
     const radius = parseFloat(getComputedStyle(face).borderTopLeftRadius) || 0;
-    const shared = coverReady && target?.isConnected ? sharedCover(target, bounds) : null;
+    const shared = copy && target?.isConnected ? sharedCover(target, bounds) : null;
     const to = shared?.rect ?? bounds;
     const movement = [
       { transform: 'translate(0px, 0px) scale(1, 1)' },
       { transform: `translate(${to.left - from.left}px, ${to.top - from.top}px) scale(${to.width / from.width}, ${to.height / from.height})` }
     ];
-    const reveal = animate(surface, [
-      { clipPath: clipFrom(from, bounds, radius) },
-      { clipPath: 'inset(0px 0px 0px 0px round 0px)' }
-    ]);
-    setStyle(surface, 'will-change', 'transform, clip-path');
-    setStyle(backdrop, 'visibility', 'hidden');
-    setStyle(underlay, 'visibility', 'visible');
-    setStyle(underlay, 'will-change', 'opacity');
-    animate(underlay, [{ opacity: 1 }, { opacity: 0 }], EXPAND_MS * 0.55);
-    animate(shadow, movement);
-    animate(shadow, [{ opacity: 1 }, { opacity: 0 }], EXPAND_MS * 0.55);
+    const crop = [
+      { clipPath: `inset(0px round ${radius}px)` },
+      { clipPath: FULL_CLIP }
+    ];
+    const start = animations.length;
 
-    if (shared && coverCopy) {
-      // 用已解码的首屏图片绘制唯一一份封面，末帧与实际图片的盒子、裁切和滤镜相同。
-      const { box, style } = shared;
-      const { objectFit, objectPosition, filter, backgroundColor, boxShadow, borderRadius } = style;
-      const sx = from.width / to.width;
-      const sy = from.height / to.height;
-      const dx = from.left - box.left - (to.left - box.left) * sx;
-      const dy = from.top - box.top - (to.top - box.top) * sy;
-      coverLayer = document.createElement('div');
-      Object.assign(coverLayer.style, {
-        position: 'absolute', inset: '0', pointerEvents: 'none', willChange: 'clip-path'
+    if (shared && copy) {
+      const { filter, backgroundColor } = shared.style;
+      Object.assign(copy.style, {
+        position: 'absolute', inset: '0', display: 'block',
+        width: '100%', height: '100%', objectFit: 'fill', filter, backgroundColor
       });
-      Object.assign(coverCopy.style, {
-        position: 'absolute', display: 'block',
-        left: `${box.left - layerBounds.left}px`, top: `${box.top - layerBounds.top}px`,
-        width: `${box.width}px`, height: `${box.height}px`, maxWidth: 'none',
-        transformOrigin: 'left top', objectFit, objectPosition, filter, backgroundColor, boxShadow, borderRadius,
-        willChange: 'transform'
-      });
-      coverLayer.append(coverCopy);
-      layer.append(coverLayer);
-      animate(coverLayer, [
-        { clipPath: clipFrom(from, layerBounds, radius) },
-        { clipPath: 'inset(0px 0px 0px 0px round 0px)' }
-      ]);
-      animate(coverCopy, [
-        { transform: `translate(${dx}px, ${dy}px) scale(${sx}, ${sy})` },
-        { transform: 'none' }
-      ]);
-      setStyle(face, 'visibility', 'hidden');
-      setStyle(shared.target, 'visibility', 'hidden');
+      const source = face.querySelector('img');
+      if (source) setStyle(source, 'visibility', 'hidden');
+      face.append(copy);
+      restore.push(() => copy.remove());
+      // 展开时只绘制加载封面。真实首屏仍留在原来的阅读层和位置。
+      setStyle(shared.target, 'opacity', '0');
+      setStyle(mask, 'clip-path', FULL_CLIP);
+      animate(backdrop, [{ opacity: 1 }, { opacity: 0 }], EXPAND_MS * 0.65);
     } else {
-      animate(face, movement);
-      animate(face, [
-        { clipPath: `inset(0px round ${radius}px)` },
-        { clipPath: 'inset(0px round 0px)' }
+      animate(mask, [
+        { clipPath: clipFrom(from, bounds, radius) },
+        { clipPath: FULL_CLIP }
       ]);
+      setStyle(backdrop, 'visibility', 'hidden');
+      setStyle(underlay, 'visibility', 'visible');
+      const tint = underlay.firstElementChild;
+      if (tint instanceof HTMLElement) animate(tint, [{ opacity: 1 }, { opacity: 0 }], EXPAND_MS * 0.55);
       animate(face, [{ opacity: 1 }, { opacity: 0 }], EXPAND_MS * 0.45);
     }
-    onExpand();
-    reveal.finished.then(finish, () => {});
+
+    animate(face, movement);
+    animate(face, crop);
+    animate(shadow, movement);
+    animate(shadow, [{ opacity: 1 }, { opacity: 0 }], EXPAND_MS * 0.55);
+    await Promise.all(animations.slice(start).map(animation => animation.finished));
+    // 保持 fill 终点跨过一次绘制，再同帧移除加载页并交还封面。
+    await waitForOpeningPaint(paint.signal);
+    if (!paint.signal.aborted) onFinish();
   }
 
-  window.addEventListener('resize', finish, { once: true });
-  animate(meta, [{ opacity: 1, transform: 'translate(-50%, 0px)' }, {
-    opacity: 0, transform: 'translate(-50%, 7px)'
-  }], READER_OPEN_CLEAR_MS).finished.then(expand, () => {});
+  void run().catch(async () => {
+    if (paint.signal.aborted) return;
+    setStyle(mask, 'clip-path', FULL_CLIP);
+    await waitForOpeningPaint(paint.signal);
+    if (!paint.signal.aborted) onFinish();
+  });
   return { cancel: stop };
 }

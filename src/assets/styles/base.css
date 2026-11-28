@@ -111,6 +111,8 @@
 
     :root {
       --library-topbar-height: 104px;
+      --homura-z-mobile-nav: 40;
+      --homura-z-settings-detail: 49;
     }
 
     html:has(.library-header-bar) {
@@ -180,7 +182,7 @@
       #homura-mobile-nav-root {
         position: absolute;
         inset: auto 0 0;
-        z-index: 40;
+        z-index: var(--homura-z-mobile-nav);
         height: 0;
         pointer-events: none;
       }
@@ -221,13 +223,26 @@
       --homura-back-scrim-opacity: 1;
     }
 
+    .reader-reveal-mask {
+      position: fixed;
+      inset: 0;
+      z-index: 50;
+      pointer-events: none;
+    }
+
+    .reader-reveal-mask.is-opening {
+      clip-path: inset(50%);
+    }
+
     .reader-dismiss-layer {
+      pointer-events: auto;
       transform-origin: center center;
       transform:
         translate3d(var(--homura-back-reader-x), 0, 0)
         scale(var(--homura-back-reader-scale));
       border-radius: var(--homura-back-reader-radius);
       will-change: transform, border-radius;
+      backface-visibility: hidden;
     }
 
     /* 整页只做二维平移，避免 WebView 把书架合成层当纹理缩放 */

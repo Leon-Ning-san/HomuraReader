@@ -313,7 +313,10 @@ function pumpMangaDecodeQueue() {
     const token = ++mangaDecodeToken;
     mangaDecoding.set(best.index, token);
     mangaDecodeActive++;
-    decodePageImage(best.imgEl, best.pageData.itemRef as MangaPageItem, { preserveSrcOnEmpty: true })
+    decodePageImage(best.imgEl, best.pageData.itemRef as MangaPageItem, {
+      preserveSrcOnEmpty: true,
+      requireDecode: props.opening
+    })
       .then(ok => {
         if (disposed || reader.currentBook?.id !== mountedBookId) return;
         if (mangaDecoding.get(best.index) !== token) return;
