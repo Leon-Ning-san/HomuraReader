@@ -129,9 +129,9 @@ fn validate_release_tag(tag: &str) -> Result<String, DownloadCommandError> {
     let valid = !trimmed.is_empty()
         && trimmed.len() <= TAG_MAX_LEN
         && !trimmed.contains("..")
-        && trimmed
-            .chars()
-            .all(|character| character.is_ascii_alphanumeric() || matches!(character, '.' | '-' | '_'));
+        && trimmed.chars().all(|character| {
+            character.is_ascii_alphanumeric() || matches!(character, '.' | '-' | '_')
+        });
     if valid {
         Ok(trimmed.to_string())
     } else {
@@ -509,7 +509,10 @@ async fn fetch_github_text(
 
     let status = response.status();
     if status.as_u16() == 429 {
-        return Err(command_error("RATE_LIMIT", "GitHub 暂时限制了更新查询，请稍后再试。"));
+        return Err(command_error(
+            "RATE_LIMIT",
+            "GitHub 暂时限制了更新查询，请稍后再试。",
+        ));
     }
     if !status.is_success() {
         return Err(command_error(
