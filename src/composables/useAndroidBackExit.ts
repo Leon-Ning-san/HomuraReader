@@ -7,6 +7,7 @@
 
 import { onMounted, onBeforeUnmount, ref, shallowRef, watch } from 'vue';
 import { isAndroid } from '../services/platform.ts';
+import { showAndroidToast } from '../services/androidToast.ts';
 import { t } from './useI18n.ts';
 import type { useReaderStore } from '../stores/reader.ts';
 
@@ -81,17 +82,6 @@ export function useAndroidBackExit(reader: ReaderStore, dismissOverlay: () => bo
     if (listener && typeof listener.unregister === 'function') return listener.unregister();
   }
 
-  async function showExitToast() {
-    const core = window.__TAURI__ && window.__TAURI__.core;
-    if (!core || typeof core.invoke !== 'function') return;
-
-    try {
-      await core.invoke('plugin:android-toast|show', { message: t(EXIT_TOAST_TEXT) });
-    } catch (err) {
-      console.warn('[HOMURA] 显示 Android 退出提示失败', err);
-    }
-  }
-
   async function exitApp() {
     if (exitRequested) return;
     exitRequested = true;
@@ -125,7 +115,7 @@ export function useAndroidBackExit(reader: ReaderStore, dismissOverlay: () => bo
     }
 
     lastBackAt = now;
-    showExitToast();
+    void showAndroidToast(t(EXIT_TOAST_TEXT));
   }
 
   async function enableBackListener() {

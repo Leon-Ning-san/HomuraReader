@@ -30,7 +30,10 @@ import { applyRestoredProgress, scheduleProgressSave, flushProgress } from '../s
 import { resolveEpubLink, findEpubLinkPage } from '../services/epubLinks.ts';
 import { openReadingUrl } from '../services/external.ts';
 import { logRuntimeOperation } from '../services/runtimeLogs.ts';
+import { isAndroid } from '../services/platform.ts';
+import { showAndroidToast } from '../services/androidToast.ts';
 import { collectionReadingOrder, adjacentCollectionBook, spreadBounds } from '../services/collectionReading.ts';
+import { pageTurnTarget } from '../services/pageTurnGeometry.ts';
 import { hasArchiveSource } from '../services/archiveAccess.ts';
 import { ensureNativeArchiveSession, releaseNativeArchiveSession } from '../services/nativeArchive.ts';
 import { scheduleSmartStorage } from '../services/smartStorageRuntime.ts';
@@ -224,12 +227,20 @@ export const useReaderStore = defineStore('reader', () => {
   });
   const previousCollectionBook = computed(() => adjacentCollectionBook(collectionBooks.value, currentBook.value?.id ?? '', -1));
   const nextCollectionBook = computed(() => adjacentCollectionBook(collectionBooks.value, currentBook.value?.id ?? '', 1));
-  const atFirstPage = computed(() => layoutConfig.direction === 'vertical' ? webtoonBounds.value.atStart : spreadBounds(currentIndex.value, activePages.value.length, effectiveDouble.value, layoutConfig.coverOffset).start === 0);
+  const pagedBounds = computed(() => spreadBounds(currentIndex.value, activePages.value.length, effectiveDouble.value, layoutConfig.coverOffset));
+
+  function isAtPagedBoundary(forward: boolean) {
+    return forward
+      ? activePages.value.length > 0 && pagedBounds.value.end === activePages.value.length - 1
+      : pagedBounds.value.start === 0;
+  }
+
+  const atFirstPage = computed(() => layoutConfig.direction === 'vertical' ? webtoonBounds.value.atStart : isAtPagedBoundary(false));
   const atLastPage = computed(() => {
     if (paginationPending.value) return false;
     return layoutConfig.direction === 'vertical'
       ? webtoonBounds.value.atEnd
-      : activePages.value.length > 0 && spreadBounds(currentIndex.value, activePages.value.length, effectiveDouble.value, layoutConfig.coverOffset).end === activePages.value.length - 1;
+      : isAtPagedBoundary(true);
   });
 
   // 跳读后才有返回目标；已经回到原来的那一屏（单双页同屏）时按钮自动消失
@@ -931,47 +942,34 @@ export const useReaderStore = defineStore('reader', () => {
 
   // ---- 翻页 ----
 
-  function goNextPage() {
+  function turnPage(forward: boolean) {
     if (!currentBook.value || openingBook.value) return;
-    logRuntimeOperation('阅读下一页', `${currentBook.value.title} · 第 ${currentIndex.value + 1}/${activePages.value.length} 页`);
-    if (currentCollection.value && atLastPage.value) return openAdjacentCollectionBook(1);
-    if (layoutConfig.direction === 'vertical') {
-      if (webtoonScrollBy.value) webtoonScrollBy.value(1);
+    const vertical = layoutConfig.direction === 'vertical';
+    const total = activePages.value.length;
+    if (isAndroid && !vertical && isAtPagedBoundary(forward)) {
+      if (total > 0 && (!forward || !paginationPending.value)) {
+        void showAndroidToast(t(forward ? '已经是最后一页了' : '已经是第一页了'));
+      }
       return;
     }
-    const step = getStepSizeForNext();
-    // In LTR, Next page slides in from Right ('enter-from-right').
-    // In Japanese RTL, Next page slides in from Left ('enter-from-left').
-    const slideDir = layoutConfig.direction === 'rtl' ? 'enter-from-left' : 'enter-from-right';
-
-    if (currentIndex.value + step < activePages.value.length) {
-      currentIndex.value += step;
-      requestRender(slideDir);
-    } else if (currentIndex.value < activePages.value.length - 1) {
-      currentIndex.value = activePages.value.length - 1;
-      requestRender(slideDir);
+    logRuntimeOperation(forward ? '阅读下一页' : '阅读上一页', `${currentBook.value.title} · 第 ${currentIndex.value + 1}/${total} 页`);
+    if (currentCollection.value && (forward ? atLastPage.value : atFirstPage.value)) {
+      return openAdjacentCollectionBook(forward ? 1 : -1);
     }
-  }
-
-  function goPrevPage() {
-    if (!currentBook.value || openingBook.value) return;
-    logRuntimeOperation('阅读上一页', `${currentBook.value.title} · 第 ${currentIndex.value + 1}/${activePages.value.length} 页`);
-    if (currentCollection.value && atFirstPage.value) return openAdjacentCollectionBook(-1);
-    if (layoutConfig.direction === 'vertical') {
-      if (webtoonScrollBy.value) webtoonScrollBy.value(-1);
+    if (vertical) {
+      webtoonScrollBy.value?.(forward ? 1 : -1);
       return;
     }
-    const step = getStepSizeForPrev();
-    const slideDir = layoutConfig.direction === 'rtl' ? 'enter-from-right' : 'enter-from-left';
-
-    if (currentIndex.value - step >= 0) {
-      currentIndex.value -= step;
-      requestRender(slideDir);
-    } else if (currentIndex.value > 0) {
-      currentIndex.value = 0;
-      requestRender(slideDir);
-    }
+    const step = forward ? getStepSizeForNext() : getStepSizeForPrev();
+    const target = pageTurnTarget(currentIndex.value, total, step, forward);
+    if (target === null) return;
+    currentIndex.value = target;
+    requestRender(forward === (layoutConfig.direction !== 'rtl') ? 'enter-from-right' : 'enter-from-left');
   }
+
+  function goNextPage() { return turnPage(true); }
+
+  function goPrevPage() { return turnPage(false); }
 
   function onLeftButtonClick() {
     if (isNavigationInverted()) goNextPage();
@@ -1084,6 +1082,7 @@ export const useReaderStore = defineStore('reader', () => {
     nextCollectionBook,
     atFirstPage,
     atLastPage,
+    isAtPagedBoundary,
     webtoonBounds,
     openingBook,
     openError,

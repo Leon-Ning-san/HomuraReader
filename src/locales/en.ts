@@ -694,6 +694,8 @@ export default {
   '启动更新安装失败': 'Could not start installation',
   '读取更新日志失败': 'Could not load changelog',
   '再按一次退出': 'Press back again to exit',
+  '已经是第一页了': 'Already on the first page',
+  '已经是最后一页了': 'Already on the last page',
   '按目录分别创建 {0} 个一级书库': 'create {0} collections by folder',
   '将这批作品放进一个新书库': 'put these books in a new collection',
   '为导入内容创建书库？': 'Create a collection for this import?',

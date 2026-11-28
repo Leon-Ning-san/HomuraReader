@@ -629,6 +629,18 @@ function resetStageTransform() {
   if (el) el.style.transform = 'translate3d(0, 0, 0)';
 }
 
+function isAndroidBoundaryDrag() {
+  return isAndroid && drag.dx !== 0 && reader.isAtPagedBoundary((drag.dx < 0) !== reader.isNavigationInverted());
+}
+
+function turnFromCanvas(zone: 'left' | 'right', originY: number) {
+  const index = reader.currentIndex;
+  turnOriginY = originY;
+  if (zone === 'left') reader.onLeftButtonClick();
+  else reader.onRightButtonClick();
+  if (isAndroid && reader.currentIndex === index) turnOriginY = null;
+}
+
 function onPointerDown(e: PointerEvent) {
   if (!reader.currentBook || reader.openingBook || pendingRender || ui.readerDrawerOpen || document.querySelector('dialog[open]')) return;
   if (e.isPrimary === false) { onPointerCancel(undefined); return; }
@@ -707,6 +719,12 @@ function onPointerMove(e: PointerEvent) {
     drag.axis = 'x';
   }
   if (drag.axis === 'x') {
+    if (isAndroidBoundaryDrag()) {
+      if (gesturePreview) stopPaperTurn();
+      resetStageTransform();
+      coverClass(false);
+      return;
+    }
     if (!prepareGestureTurn()) {
       if (gesturePreview) stopPaperTurn();
       if (drag.style === 'slide') coverClass(true);
@@ -752,9 +770,7 @@ function onPointerUp(e: PointerEvent) {
     if (e.pointerType === 'mouse') suppressMouseClick = true;
     if (result.type === 'tap' && activateLink(e.clientX, e.clientY)) return;
     if (result.zone === 'left' || result.zone === 'right') {
-      turnOriginY = drag.startY - bounds.top;
-      if (result.zone === 'left') reader.onLeftButtonClick();
-      else reader.onRightButtonClick();
+      turnFromCanvas(result.zone, drag.startY - bounds.top);
     } else {
       turnOriginY = null;
       logRuntimeOperation('切换阅读工具栏');
@@ -768,7 +784,7 @@ function onPointerUp(e: PointerEvent) {
     return;
   }
   // 长按未移动不翻页；拖动不足距离时回弹，且不补发点击。
-  if (drag.axis === 'x' && dx && el && el.animate && !prefersReducedMotion()) {
+  if (drag.axis === 'x' && dx && !isAndroidBoundaryDrag() && el && el.animate && !prefersReducedMotion()) {
     if (e.pointerType === 'mouse') suppressMouseClick = true;
     el.style.transform = 'translate3d(0, 0, 0)';
     const bounce = el.animate(
@@ -826,9 +842,7 @@ function onClick(e: MouseEvent) {
   if (!bounds || bounds.width <= 0) return;
   const zone = classifyReaderGesture({ dx: 0, dy: 0, duration: 0, width: bounds.width, x: e.clientX - bounds.left }).zone;
   if (zone === 'left' || zone === 'right') {
-    turnOriginY = e.clientY - bounds.top;
-    if (zone === 'left') reader.onLeftButtonClick();
-    else reader.onRightButtonClick();
+    turnFromCanvas(zone, e.clientY - bounds.top);
   } else {
     turnOriginY = null;
     logRuntimeOperation('切换阅读工具栏');
