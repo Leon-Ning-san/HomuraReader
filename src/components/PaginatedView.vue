@@ -82,8 +82,8 @@ import { resolveProseStyle, resolveReaderMetrics, resolveReaderFolios, type Read
 import { epubLinkAtPoint } from '../services/epubLinks.ts';
 import { classifyReaderGesture } from '../services/readerGestures.ts';
 import { logRuntimeOperation } from '../services/runtimeLogs.ts';
-import { createPageTurn, type PageTurnController, type PaperTurnStyle } from '../services/pageTurn.ts';
-import { pageTurnTarget, type TurnSide } from '../services/pageTurnGeometry.ts';
+import { createPageTurn, type PageTurnController } from '../services/pageTurn.ts';
+import { pageTurnTarget, shouldCommitCoverSlide, type TurnSide } from '../services/pageTurnGeometry.ts';
 import { prefersReducedMotion } from '../services/spring.ts';
 import { decodeVisibleReaderImages, standaloneCover } from '../services/readerTransition.ts';
 import NovelCard from './NovelCard.vue';
@@ -155,18 +155,22 @@ let activePaperTurn: PageTurnController | null = null;
 let finishBufferFade: (() => void) | null = null;
 let bufferQueue: Promise<unknown> = Promise.resolve();
 let turnOriginY: number | null = null;
-// 翻页动画期间合并后续请求：只保留最后一次目标页，动画结束后补渲染
+// 覆盖滑动依次处理已接收的落点，卷页仍合并到最后一次请求。
 let renderRunId = 0;
 let renderBusy = false;
-let queuedTurnDir: string | null = null;
+const queuedTurns: { direction: string; index: number }[] = [];
+let settlingCover = false;
+const coverEnabled = () => theme.transitionStyle === 'slide' && !prefersReducedMotion();
+const mobileCover = () => isCompact.value || isAndroid;
+const coverClass = (active: boolean) => pageStage.value?.parentElement?.classList.toggle('is-cover-turning', active);
 interface GesturePreview {
   targetIndex: number;
   nextSlot: number;
   forward: boolean;
-  side: TurnSide;
   dx: number;
   dy: number;
   ready: Promise<boolean>;
+  velocity: number;
   controller: PageTurnController | null;
 }
 let gesturePreview: GesturePreview | null = null;
@@ -213,18 +217,20 @@ function buildSlotVM(pair: ReaderPage[], total: number): SlotVM {
 }
 
 // Populate a target buffer slot (0 or 1) and decode its images BEFORE starting the transition
-async function populateBufferSlot(slotIndex: number, pair: ReaderPage[], total: number) {
+async function populateBufferSlot(slotIndex: number, pair: ReaderPage[], total: number, valid: () => boolean) {
   if (isManga.value) {
     for (const p of pair) {
       await ensurePageUrlLoaded(p.itemRef as MangaPageItem);
     }
   }
+  if (!valid()) return false;
   const vm = buildSlotVM(pair, total);
   const next = slotVMs.value.slice();
   next[slotIndex] = vm;
   slotVMs.value = next;
   // 等 Vue 把槽位内容（包装显隐 / 小说 v-html）patch 进 DOM 后再解码或开启动画
   await nextTick();
+  if (!valid()) return false;
   clearSlotImages(slotIndex, vm.mode === 'single' ? ['single'] : ['left', 'right']);
 
   if (!isManga.value) return true;
@@ -242,7 +248,7 @@ async function populateBufferSlot(slotIndex: number, pair: ReaderPage[], total: 
 function prepareSlot(slot: number, pair: ReaderPage[], total: number, valid: () => boolean, requireImages = false) {
   const task = bufferQueue.then(async () => {
     if (!valid()) return false;
-    const decoded = await populateBufferSlot(slot, pair, total);
+    const decoded = await populateBufferSlot(slot, pair, total, valid);
     return valid() && (!requireImages || decoded);
   });
   bufferQueue = task.catch(() => {});
@@ -252,6 +258,7 @@ function prepareSlot(slot: number, pair: ReaderPage[], total: number, valid: () 
 function showSlot(slot: number) {
   stageEls.forEach((element, index) => {
     if (!element) return;
+    element.classList.remove('is-cover-loading');
     element.style.opacity = index === slot ? '1' : '0';
     element.style.transform = 'translate3d(0,0,0)';
     element.style.zIndex = index === slot ? '20' : '10';
@@ -297,6 +304,8 @@ function stopPaperTurn() {
   gesturePreview = null;
   activePaperTurn?.destroy();
   activePaperTurn = null;
+  settlingCover = false;
+  coverClass(false);
   showSlot(reader.activeBufferSlot);
 }
 
@@ -304,22 +313,23 @@ function finishPaperTurn(controller: PageTurnController, slot: number) {
   if (activePaperTurn !== controller) return;
   controller.destroy();
   activePaperTurn = null;
+  settlingCover = false;
+  coverClass(false);
   showSlot(slot);
 }
 
-function paperTurnPageNumbers(outgoingSlot: number, incomingSlot: number) {
+function paperTurnPageNumbers(outgoingSlot: number, incomingSlot: number, targetPair?: ReaderPage[]) {
   const label = pageStage.value?.querySelector<HTMLElement>('.md-reader-footer-pages');
   const outgoing = slotVMs.value[outgoingSlot]?.folios;
-  const incoming = slotVMs.value[incomingSlot]?.folios;
+  const incoming = targetPair ? buildSlotVM(targetPair, reader.activePages.length).folios : slotVMs.value[incomingSlot]?.folios;
   if (!label || !outgoing?.length || !incoming?.length) return undefined;
   return { label, outgoing, incoming, total: reader.activePages.length, showTotal: label.dataset.pageCountVisible === 'true' };
 }
 
-async function renderReaderViewport(transitionDir = 'fade') {
+async function renderReaderViewport(transitionDir: string, targetIndex: number) {
   const book = reader.currentBook;
   if (!book) return;
   const myToken = ++reader.renderToken;
-  const targetIndex = reader.currentIndex;
   const forward = targetIndex > displayedIndex;
   const preview = gesturePreview?.targetIndex === targetIndex ? gesturePreview : null;
   const originY = turnOriginY ?? 0;
@@ -327,16 +337,18 @@ async function renderReaderViewport(transitionDir = 'fade') {
   pendingRender = myToken;
   cancelIdlePreload();
   if (!preview) {
-    drag.active = false;
-    drag.pointerId = null;
+    endPointer();
     stopPaperTurn();
+    if (isDirectionalTurn(transitionDir) && coverEnabled()) coverClass(true);
   }
   const valid = () => myToken === reader.renderToken && reader.currentBook === book;
   const total = reader.activePages.length;
-  reader.sliderValue = targetIndex;
-  reader.touchProgress();
   const pair = reader.getSpreadPair(targetIndex);
-  reader.pageIndicator = `${pair.map(p => p.pageNumber).join('-')} / ${total}`;
+  if (targetIndex === reader.currentIndex) {
+    reader.sliderValue = targetIndex;
+    reader.touchProgress();
+    reader.pageIndicator = `${pair.map(p => p.pageNumber).join('-')} / ${total}`;
+  }
   try {
     if (!initialized) {
       const ready = await prepareSlot(0, pair, total, valid, props.opening);
@@ -373,16 +385,19 @@ async function renderReaderViewport(transitionDir = 'fade') {
     reader.activeBufferSlot = nextSlot;
     displayedIndex = targetIndex;
     pendingRender = 0;
+    if (isManga.value) releaseDistantPageUrls(book, targetIndex, isAndroid ? 3 : 5);
     const outEl = stageEls[prevSlot]!;
     const inEl = stageEls[nextSlot]!;
     const style = theme.transitionStyle;
-    const directional = transitionDir === 'enter-from-right' || transitionDir === 'enter-from-left';
-    if (!controller && directional && (style === 'slide' || style === 'curl') && !prefersReducedMotion()) {
+    if (!controller && isDirectionalTurn(transitionDir) && (style === 'slide' || style === 'curl') && !prefersReducedMotion()) {
       controller = createPageTurn({ stage: pageStage.value!, outgoing: outEl, incoming: inEl, style, forward, side: reader.layoutConfig.direction === 'rtl' ? -1 : 1, originY, compact: isCompact.value, lowPower: isAndroid, pageNumbers: paperTurnPageNumbers(prevSlot, nextSlot) });
       activePaperTurn = controller;
     }
     if (controller) {
-      const completed = await controller.finish(true);
+      settlingCover = style === 'slide';
+      const finished = controller.finish(true, preview?.velocity);
+      if (settlingCover && queuedTurns.length) flushQueuedTurn();
+      const completed = await finished;
       if (!completed || !valid()) return;
       finishPaperTurn(controller, nextSlot);
     } else {
@@ -399,7 +414,10 @@ async function renderReaderViewport(transitionDir = 'fade') {
     stopPaperTurn();
     if (!initialized) emit('first-frame', book, false);
   } finally {
-    if (pendingRender === myToken) pendingRender = 0;
+    if (pendingRender === myToken) {
+      pendingRender = 0;
+      if (!activePaperTurn) coverClass(false);
+    }
   }
 }
 
@@ -408,74 +426,90 @@ function isDirectionalTurn(transitionDir: string) {
 }
 
 function clearQueuedTurn() {
-  queuedTurnDir = null;
+  queuedTurns.length = 0;
 }
 
-async function runReaderRender(transitionDir: string) {
+async function runReaderRender(direction: string, index = reader.currentIndex) {
   const runId = ++renderRunId;
   renderBusy = true;
   try {
-    await renderReaderViewport(transitionDir);
+    await renderReaderViewport(direction, index);
   } finally {
-    if (runId !== renderRunId) return;
-    renderBusy = false;
-    if (queuedTurnDir) flushQueuedTurn();
+    if (runId === renderRunId) {
+      renderBusy = false;
+      flushQueuedTurn();
+    }
   }
 }
 
 function flushQueuedTurn() {
-  const transitionDir = queuedTurnDir;
-  queuedTurnDir = null;
-  if (!transitionDir || renderBusy || !reader.currentBook) return;
-  void runReaderRender(transitionDir);
+  if (!queuedTurns.length || !reader.currentBook || (renderBusy && !settlingCover)) return;
+  const turn = queuedTurns.shift()!;
+  void runReaderRender(turn.direction, turn.index);
 }
 
-function requestReaderRender(transitionDir: string) {
+function requestReaderRender(direction: string) {
   if (!reader.currentBook) return;
-  // 滑条、重排等非翻页请求立即生效，并取消尚未执行的翻页补渲染
-  if (!isDirectionalTurn(transitionDir)) {
+  // 跳章、重排和滑条定位会废弃之前请求的落点。
+  if (!isDirectionalTurn(direction)) {
     clearQueuedTurn();
-    void runReaderRender(transitionDir);
+    void runReaderRender(direction);
     return;
   }
-  queuedTurnDir = transitionDir;
-  if (renderBusy) return;
-  queuedTurnDir = null;
-  void runReaderRender(transitionDir);
+  if (!coverEnabled()) clearQueuedTurn();
+  queuedTurns.push({ direction, index: reader.currentIndex });
+  flushQueuedTurn();
 }
 
 function prepareGestureTurn() {
-  const style = theme.transitionStyle;
-  if ((style !== 'slide' && style !== 'curl') || prefersReducedMotion()) return false;
-  const forward = drag.dx < 0 ? !reader.isNavigationInverted() : reader.isNavigationInverted();
-  const step = forward ? reader.getStepSizeForNext() : reader.getStepSizeForPrev();
-  const targetIndex = pageTurnTarget(reader.currentIndex, reader.activePages.length, step, forward);
-  if (targetIndex === null) return false;
-  if (gesturePreview?.targetIndex === targetIndex) {
+  const style = drag.style;
+  if (style !== 'slide' && style !== 'curl') return false;
+  const forward = drag.dx === 0 && gesturePreview
+    ? gesturePreview.forward
+    : (drag.dx < 0) !== reader.isNavigationInverted();
+  if (gesturePreview?.forward === forward) {
     gesturePreview.dx = drag.dx;
     gesturePreview.dy = drag.dy;
     gesturePreview.controller?.move(drag.dx, drag.dy);
     return true;
   }
+  const direction = forward ? 'forward' : 'backward';
+  if (dragTargets[direction] === undefined) {
+    const step = forward ? reader.getStepSizeForNext() : reader.getStepSizeForPrev();
+    dragTargets[direction] = pageTurnTarget(reader.currentIndex, reader.activePages.length, step, forward);
+  }
+  const targetIndex = dragTargets[direction];
+  if (targetIndex === null) return false;
   stopPaperTurn();
   cancelIdlePreload();
   const generation = ++previewGeneration;
   const bookId = reader.currentBook?.id;
   const nextSlot = 1 - reader.activeBufferSlot;
   const side: TurnSide = forward ? (drag.dx < 0 ? 1 : -1) : (drag.dx > 0 ? 1 : -1);
-  const bounds = gestureEl.value!.getBoundingClientRect();
+  const bounds = drag.bounds!;
   const y = drag.startY - bounds.top;
   const originY = y < bounds.height * 0.28 ? 0 : y > bounds.height * 0.72 ? bounds.height : y;
-  const preview: GesturePreview = { targetIndex, nextSlot, forward, side, dx: drag.dx, dy: drag.dy, ready: Promise.resolve(false), controller: null };
+  const preview: GesturePreview = { targetIndex, nextSlot, forward, dx: drag.dx, dy: drag.dy, ready: Promise.resolve(false), velocity: 0, controller: null };
   gesturePreview = preview;
   const valid = () => gesturePreview === preview && generation === previewGeneration && reader.currentBook?.id === bookId;
-  preview.ready = prepareSlot(nextSlot, reader.getSpreadPair(targetIndex), reader.activePages.length, valid).then(ready => {
-    if (!ready) return false;
+  const pair = reader.getSpreadPair(targetIndex);
+  const createController = (pendingContent: boolean) => {
     resetStageTransform();
-    const controller = createPageTurn({ stage: pageStage.value!, outgoing: activeStageEl()!, incoming: stageEls[nextSlot]!, style: style as PaperTurnStyle, forward, side, originY, compact: isCompact.value, lowPower: isAndroid, pageNumbers: paperTurnPageNumbers(reader.activeBufferSlot, nextSlot) });
+    const incoming = stageEls[nextSlot]!;
+    incoming.classList.toggle('is-cover-loading', pendingContent);
+    const controller = createPageTurn({ stage: pageStage.value!, outgoing: activeStageEl()!, incoming, style, forward, side, originY, compact: isCompact.value, lowPower: isAndroid, pageNumbers: paperTurnPageNumbers(reader.activeBufferSlot, nextSlot, pendingContent ? pair : undefined) });
     activePaperTurn = controller;
     preview.controller = controller;
     controller.move(preview.dx, preview.dy);
+  };
+  if (style === 'slide') {
+    createController(true);
+    coverClass(true);
+  }
+  preview.ready = prepareSlot(nextSlot, pair, reader.activePages.length, valid).then(ready => {
+    if (!ready) return false;
+    if (style === 'slide') stageEls[nextSlot]?.classList.remove('is-cover-loading');
+    else createController(false);
     return true;
   }).catch(error => {
     if (valid()) { console.warn('跟手翻页准备失败', error); stopPaperTurn(); }
@@ -484,12 +518,12 @@ function prepareGestureTurn() {
   return true;
 }
 
-function cancelGestureTurn() {
+function cancelGestureTurn(velocity = 0) {
   const controller = gesturePreview?.controller;
   previewGeneration++;
   gesturePreview = null;
   if (controller) {
-    void controller.finish(false).then(completed => {
+    void controller.finish(false, velocity).then(completed => {
       if (completed) { finishPaperTurn(controller, reader.activeBufferSlot); scheduleIdlePreload(); }
     });
   } else {
@@ -514,10 +548,6 @@ function scheduleIdlePreload() {
   // 安卓机减少预载数量和并发解码压力；一次翻页只提前准备两页。
   const pagesAhead = isAndroid ? 2 : 4;
   const delay = isAndroid ? 420 : 280;
-
-  // 回收必须跟翻页同步执行：预载会被下一次快速翻页取消，
-  // 若把回收放进延时的预载任务，连续翻页时旧 asset URL 会一直不释放。
-  releaseDistantPageUrls(reader.currentBook, startIndex, isAndroid ? 3 : 5);
 
   reader.preloadTimer = window.setTimeout(async () => {
     if (generation !== preloadGeneration || reader.currentIndex !== startIndex) return;
@@ -557,6 +587,9 @@ const drag: {
   dy: number;
   axis: 'x' | 'y' | null;
   maxDistance: number;
+  bounds: DOMRect | null;
+  style: string;
+  mobile: boolean;
 } = {
   active: false,
   pointerId: null,
@@ -566,8 +599,13 @@ const drag: {
   dx: 0,
   dy: 0,
   axis: null,
-  maxDistance: 0
+  maxDistance: 0,
+  bounds: null,
+  style: 'none',
+  mobile: false
 };
+const dragTargets: Partial<Record<'forward' | 'backward', number | null>> = {};
+const pointerSamples: { x: number; time: number }[] = [];
 let pressedLink: HTMLAnchorElement | null = null;
 let lastPointerType: string | null = null;
 let allowMouseClick = false;
@@ -606,6 +644,13 @@ function onPointerDown(e: PointerEvent) {
   drag.startX = e.clientX;
   drag.startY = e.clientY;
   drag.startTime = Date.now();
+  drag.bounds = gestureEl.value!.getBoundingClientRect();
+  drag.style = prefersReducedMotion() ? 'none' : theme.transitionStyle;
+  drag.mobile = mobileCover();
+  dragTargets.forward = undefined;
+  dragTargets.backward = undefined;
+  pointerSamples.length = 0;
+  samplePointer(e);
   drag.dx = 0;
   drag.dy = 0;
   drag.axis = null;
@@ -615,15 +660,46 @@ function onPointerDown(e: PointerEvent) {
   }
 }
 
+function samplePointer(event: PointerEvent) {
+  if (drag.style !== 'slide' || !drag.mobile) return;
+  const coalesced = event.getCoalescedEvents?.() ?? [];
+  for (const point of coalesced.length ? coalesced : [event]) {
+    if (point.clientX !== pointerSamples[pointerSamples.length - 1]?.x) {
+      pointerSamples.push({ x: point.clientX, time: point.timeStamp });
+    }
+  }
+  const latest = pointerSamples[pointerSamples.length - 1];
+  while (latest && (pointerSamples.length > 8 || latest.time - pointerSamples[0]!.time > 64)) {
+    pointerSamples.shift();
+  }
+}
+
+function pointerVelocity(event: PointerEvent) {
+  const latest = pointerSamples[pointerSamples.length - 1];
+  const oldest = pointerSamples[0];
+  if (!latest || !oldest || latest === oldest || event.timeStamp - latest.time > 64) return 0;
+  return (latest.x - oldest.x) / Math.max(8, latest.time - oldest.time);
+}
+
+function endPointer() {
+  const id = drag.pointerId;
+  drag.active = false;
+  drag.pointerId = null;
+  if (id !== null && gestureEl.value?.hasPointerCapture?.(id)) gestureEl.value.releasePointerCapture(id);
+}
+
 function onPointerMove(e: PointerEvent) {
   if (!drag.active || e.pointerId !== drag.pointerId) return;
   if (ui.readerDrawerOpen) { onPointerCancel(e); return; }
+  samplePointer(e);
   drag.dx = e.clientX - drag.startX;
   drag.dy = e.clientY - drag.startY;
   const absX = Math.abs(drag.dx);
   const absY = Math.abs(drag.dy);
   drag.maxDistance = Math.max(drag.maxDistance, absX, absY);
-  if (!drag.axis && (absX > 8 || absY > 8)) {
+  if (drag.style === 'slide') {
+    if (!drag.axis && absX >= 7 && absX > absY) drag.axis = 'x';
+  } else if (!drag.axis && (absX > 8 || absY > 8)) {
     drag.axis = absX >= absY ? 'x' : 'y';
   }
   // 手指起始方向常有竖向抖动：横向位移明显占优时改判为横向手势
@@ -632,7 +708,8 @@ function onPointerMove(e: PointerEvent) {
   }
   if (drag.axis === 'x') {
     if (!prepareGestureTurn()) {
-      if (gesturePreview) cancelGestureTurn();
+      if (gesturePreview) stopPaperTurn();
+      if (drag.style === 'slide') coverClass(true);
       const el = activeStageEl();
       if (el) el.style.transform = `translate3d(${dampedOffset(drag.dx)}px, 0, 0)`;
     }
@@ -642,18 +719,30 @@ function onPointerMove(e: PointerEvent) {
 function onPointerUp(e: PointerEvent) {
   if (!drag.active || e.pointerId !== drag.pointerId) return;
   onPointerMove(e);
-  drag.active = false;
-  drag.pointerId = null;
+  if (!drag.active) return;
+  endPointer();
 
   const dx = drag.dx;
   const dy = drag.dy;
   const dt = Math.max(1, Date.now() - drag.startTime);
-  const bounds = gestureEl.value!.getBoundingClientRect();
-  const result = classifyReaderGesture({ dx, dy, duration: dt, maxDistance: drag.maxDistance, width: bounds.width, x: e.clientX - bounds.left });
+  const bounds = drag.bounds!;
+  let result = classifyReaderGesture({ dx, dy, duration: dt, maxDistance: drag.maxDistance, width: bounds.width, x: e.clientX - bounds.left });
+  const velocity = pointerVelocity(e);
+  if (drag.style === 'slide' && drag.axis === 'x') {
+    if (drag.mobile) {
+      result = shouldCommitCoverSlide(dx, velocity, bounds.width)
+        ? { type: 'swipe', zone: dx > 0 ? 'left' : 'right' }
+        : { type: 'cancel', zone: null };
+    } else if (result.type === 'tap') {
+      result = { type: 'cancel', zone: null };
+    }
+  }
   const el = activeStageEl();
 
   if (result.type === 'swipe' || result.type === 'tap') {
-    resetStageTransform();
+    if (!gesturePreview?.controller) resetStageTransform();
+    if (gesturePreview) gesturePreview.velocity = velocity;
+    else coverClass(false);
     // 鼠标点击由原生 click 事件处理，避免 pointerup 的严格手势阈值吞掉普通点击。
     // 鼠标拖拽仍在这里翻页，并拦截浏览器随后合成的 click，防止重复翻页。
     if (e.pointerType === 'mouse' && result.type === 'tap') {
@@ -675,7 +764,7 @@ function onPointerUp(e: PointerEvent) {
   }
   if (gesturePreview) {
     if (e.pointerType === 'mouse') suppressMouseClick = true;
-    cancelGestureTurn();
+    cancelGestureTurn(velocity);
     return;
   }
   // 长按未移动不翻页；拖动不足距离时回弹，且不补发点击。
@@ -691,11 +780,15 @@ function onPointerUp(e: PointerEvent) {
     );
     reader.activeTransitionAnims = [bounce];
     bounce.onfinish = () => {
-      if (reader.activeTransitionAnims[0] === bounce) reader.activeTransitionAnims = [];
+      if (reader.activeTransitionAnims[0] === bounce) {
+        reader.activeTransitionAnims = [];
+        coverClass(false);
+      }
     };
   } else {
     if (e.pointerType === 'mouse') suppressMouseClick = true;
     resetStageTransform();
+    coverClass(false);
   }
 }
 
@@ -746,10 +839,11 @@ function onClick(e: MouseEvent) {
 function onPointerCancel(event?: PointerEvent) {
   if (event?.pointerId !== undefined && event.pointerId !== drag.pointerId) return;
   if (!drag.active) return;
-  drag.active = false;
-  drag.pointerId = null;
+  endPointer();
+  allowMouseClick = false;
+  suppressMouseClick = true;
   if (gesturePreview) cancelGestureTurn();
-  else resetStageTransform();
+  else { resetStageTransform(); coverClass(false); }
 }
 
 onMounted(() => {
@@ -791,6 +885,7 @@ onBeforeUnmount(() => {
   renderBusy = false;
   clearQueuedTurn();
   pendingRender = 0;
+  endPointer();
   stopPaperTurn();
   cancelIdlePreload();
   stageResizeObserver?.disconnect();

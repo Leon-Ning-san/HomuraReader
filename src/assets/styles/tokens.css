@@ -338,6 +338,7 @@
        ========================================================================== */
     [data-mode="light"] {
       --md-reader-paper: var(--md-surface);
+      --md-reader-cover-tint: rgb(47 51 55);
       --md-reader-ink: var(--md-on-surface);
       --md-reader-ink-soft: var(--md-on-surface-variant);
       --md-reader-ink-faint: color-mix(in oklab, var(--md-on-surface) 40%, var(--md-surface));
@@ -345,6 +346,7 @@
     }
     [data-mode="dark"] {
       --md-reader-paper: var(--md-surface);
+      --md-reader-cover-tint: rgb(8 10 15);
       --md-reader-ink: color-mix(in oklab, var(--md-on-surface) 94%, var(--md-surface));
       --md-reader-ink-soft: var(--md-on-surface-variant);
       --md-reader-ink-faint: color-mix(in oklab, var(--md-on-surface) 42%, var(--md-surface));
@@ -352,6 +354,7 @@
     }
     .reader-surface[data-reader-mode="parchment"] {
       --md-reader-paper: var(--md-parchment-paper);
+      --md-reader-cover-tint: rgb(60 45 25);
       --md-reader-ink: var(--md-parchment-ink);
       --md-reader-ink-soft: var(--md-parchment-ink-soft);
       --md-reader-ink-faint: color-mix(in oklab, var(--md-parchment-ink) 42%, var(--md-parchment-paper));
@@ -360,6 +363,7 @@
     }
     .reader-surface[data-reader-mode="green"] {
       --md-reader-paper: var(--md-reader-green-paper);
+      --md-reader-cover-tint: rgb(36 56 42);
       --md-reader-ink: var(--md-reader-green-ink);
       --md-reader-ink-soft: var(--md-reader-green-ink-soft);
       --md-reader-ink-faint: color-mix(in oklab, var(--md-reader-green-ink) 42%, var(--md-reader-green-paper));

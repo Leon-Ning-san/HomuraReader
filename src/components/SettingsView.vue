@@ -364,7 +364,7 @@
         <div ref="surfaceRef" class="settings-transition-surface" aria-hidden="true"></div>
         <div ref="detailRef" class="settings-page has-detail" :inert="returningDetail">
           <header
-            class="settings-topbar"
+            class="settings-topbar md-topbar-fade"
             :style="isCompact ? { paddingTop: 'env(safe-area-inset-top)' } : null"
           >
             <div class="settings-topbar-inner" :class="{ 'is-log-searching': activeSection === 'logs' && logSearchOpen }">
@@ -1872,10 +1872,6 @@ onBeforeUnmount(() => {
   top: 0;
   z-index: 20;
   pointer-events: none;
-}
-
-.has-detail .settings-topbar {
-  background: var(--md-surface-low);
 }
 
 .settings-transition-layer {

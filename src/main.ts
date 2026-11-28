@@ -5,7 +5,7 @@
 import { createApp, watchEffect } from 'vue';
 import { createPinia } from 'pinia';
 import App from './App.vue';
-import { isAndroid } from './services/platform.ts';
+import { isAndroid, isMacOSTauri } from './services/platform.ts';
 import { logRuntime } from './services/runtimeLogs.ts';
 import { useI18n } from './composables/useI18n.ts';
 import { useRuntimeLogStore } from './stores/runtimeLogs.ts';
@@ -29,4 +29,16 @@ app.use(pinia);
 useSettingsStore(pinia);
 useRuntimeLogStore(pinia).installCapture();
 logRuntime('info', '应用启动', 'APP', isAndroid ? 'Android' : '桌面端');
-app.mount('#app');
+async function mountApp() {
+  if (isMacOSTauri) {
+    try {
+      const inset: number = await window.__TAURI__!.core!.invoke('window_titlebar_inset');
+      document.documentElement.style.setProperty('--homura-native-titlebar-height', `${inset}px`);
+    } catch (error) {
+      console.warn('[HOMURA] 读取标题栏高度失败', error);
+    }
+  }
+  app.mount('#app');
+}
+
+void mountApp();

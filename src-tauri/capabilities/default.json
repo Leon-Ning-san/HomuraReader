@@ -43,6 +43,7 @@
       ]
     },
     "core:window:allow-set-theme",
+    "core:window:allow-start-dragging",
     "core:window:allow-set-background-color",
     "core:window:allow-set-fullscreen",
     "core:window:allow-is-fullscreen",

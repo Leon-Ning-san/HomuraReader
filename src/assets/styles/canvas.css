@@ -76,6 +76,38 @@
       background: var(--md-reader-paper, var(--md-surface));
     }
 
+    .reader-cover-dimmer {
+      position: absolute;
+      inset: 0;
+      z-index: 12;
+      background: var(--md-reader-cover-tint);
+      pointer-events: none;
+      will-change: opacity;
+    }
+
+    .reader-cover-edge {
+      position: absolute;
+      inset-block: 0;
+      z-index: 23;
+      width: 16px;
+      pointer-events: none;
+      will-change: transform, opacity;
+    }
+
+    .reader-cover-edge[data-side="right"] {
+      left: 100%;
+      background: linear-gradient(to right, color-mix(in oklab, var(--md-reader-cover-tint) 22%, transparent), transparent);
+    }
+
+    .reader-cover-edge[data-side="left"] {
+      right: 100%;
+      background: linear-gradient(to left, color-mix(in oklab, var(--md-reader-cover-tint) 22%, transparent), transparent);
+    }
+
+    .stage-buffer-layer.is-cover-loading > :not(.reader-cover-dimmer) {
+      opacity: 0;
+    }
+
     /* 翻页副本只变形已排好的纸面，不进入 Vue 的高频响应式更新。 */
     .reader-paper-turn {
       position: absolute;
@@ -127,7 +159,6 @@
     }
     .reader-turn-back,
     .reader-turn-shade,
-    .reader-turn-dimmer,
     .reader-turn-shadow {
       position: absolute;
       inset: 0;

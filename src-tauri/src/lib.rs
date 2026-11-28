@@ -94,6 +94,14 @@ fn spawn_focus_worker(window: tauri::WebviewWindow) {
     });
 }
 
+#[tauri::command]
+fn window_titlebar_inset() -> f32 {
+    #[cfg(target_os = "macos")]
+    return window_state::titlebar_inset();
+    #[cfg(not(target_os = "macos"))]
+    return 0.0;
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -111,6 +119,7 @@ pub fn run() {
         .plugin(tauri_plugin_android_system_bars::init())
         .plugin(tauri_plugin_android_volume_keys::init())
         .invoke_handler(tauri::generate_handler![
+            window_titlebar_inset,
             webdav_books::webdav_read,
             sync_webdav::sync_webdav_request,
             sync_webdav::sync_fingerprint_source,
@@ -154,6 +163,10 @@ pub fn run() {
             #[cfg(desktop)]
             {
                 if let Some(window) = app.get_webview_window("main") {
+                    #[cfg(target_os = "macos")]
+                    if let Err(err) = window_state::enable_titlebar_overlay(&window) {
+                        eprintln!("设置标题栏布局失败: {err}");
+                    }
                     window_state::restore(&window);
                     window_state::attach(window.clone());
                     spawn_focus_worker(window);

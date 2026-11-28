@@ -111,8 +111,20 @@
 
     :root {
       --library-topbar-height: 104px;
+      --homura-window-titlebar-inset: var(--homura-native-titlebar-height, 0px);
       --homura-z-mobile-nav: 40;
       --homura-z-settings-detail: 49;
+    }
+
+    :root.native-fullscreen {
+      --homura-window-titlebar-inset: 0px;
+    }
+
+    .window-titlebar-drag-region {
+      position: fixed;
+      inset: 0 0 auto;
+      height: min(16px, var(--homura-window-titlebar-inset));
+      z-index: 51;
     }
 
     html:has(.library-header-bar) {
@@ -139,6 +151,8 @@
     .has-contained-settings-scroll > .sidenav {
       position: relative;
       top: auto;
+      height: auto;
+      margin-block-start: max(16px, var(--homura-window-titlebar-inset));
     }
 
     .has-contained-settings-scroll > .library-main-column.is-settings {

@@ -14,9 +14,10 @@ test('本地主窗口允许已注册的原生命令，包括导入命令的 IPC 
   const handlers = read('src/lib.rs').match(/tauri::generate_handler!\[([\s\S]*?)\]/)?.[1];
   assert.ok(handlers, '找不到应用原生命令注册表');
   const registered = new Set();
-  for (const [, module, handler] of handlers.matchAll(/(\w+)::(\w+)/g)) {
+  for (const path of handlers.split(',').map(path => path.trim()).filter(Boolean)) {
+    const [module, handler] = path.includes('::') ? path.split('::') : ['lib', path];
     const declaration = read(`src/${module}.rs`).match(
-      new RegExp(`#\\[tauri::command([^\\]]*)\\]\\s+pub (?:async )?fn ${handler}\\(`)
+      new RegExp(`#\\[tauri::command([^\\]]*)\\]\\s+(?:pub )?(?:async )?fn ${handler}\\(`)
     );
     assert.ok(declaration, `找不到原生命令 ${module}::${handler}`);
     registered.add(declaration[1].match(/\brename\s*=\s*"([^"]+)"/)?.[1] ?? handler);

@@ -1,4 +1,6 @@
 <template>
+  <div v-if="isMacOSTauri" class="window-titlebar-drag-region" data-tauri-drag-region aria-hidden="true"></div>
+
   <!-- 手机底栏挂在阅读器预见式返回的 transform 容器外，避免长书架把 fixed 底栏带出视口 -->
   <div id="homura-mobile-nav-root"
     :inert="readerOpening || !!reader.currentBook || settingsDetailOpen || bookDetailOpen"></div>
@@ -263,6 +265,23 @@ const activeNav = ref(readSettingsSection(window.history.state) ? 'settings' : '
 const containedShelfScroll = computed(() => isMacOSTauri && !isCompact.value && activeNav.value !== 'settings');
 const containedSettingsScroll = computed(() => !isCompact.value && activeNav.value === 'settings');
 const settingsViewRef = shallowRef(null);
+
+async function syncNativeFullscreen() {
+  const nativeWindow = window.__TAURI__?.window?.getCurrentWindow?.();
+  if (nativeWindow) ui.fullscreen = await nativeWindow.isFullscreen();
+}
+
+if (isMacOSTauri) {
+  const onResize = () => { void syncNativeFullscreen().catch(() => {}); };
+  onMounted(() => {
+    onResize();
+    window.addEventListener('resize', onResize);
+  });
+  onBeforeUnmount(() => window.removeEventListener('resize', onResize));
+  watch(() => ui.fullscreen, fullscreen => {
+    document.documentElement.classList.toggle('native-fullscreen', fullscreen);
+  }, { immediate: true, flush: 'sync' });
+}
 
 watch(containedSettingsScroll, active => {
   if (active && window.scrollY > 0) window.scrollTo(0, 0);

@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { JSDOM } from 'jsdom';
-import { curlGeometry, curlLighting, curlMatrix, curlPoint, curlPolygon, curlStripTransforms, pageTurnTarget, slideGeometry, turnPhase } from '../src/services/pageTurnGeometry.ts';
+import { COVER_SLIDE, COVER_SLIDE_OVERSCAN, shouldCommitCoverSlide, curlGeometry, curlLighting, curlMatrix, curlPoint, curlPolygon, curlStripTransforms, pageTurnTarget, slideGeometry, turnPhase } from '../src/services/pageTurnGeometry.ts';
 import { createPageTurn } from '../src/services/pageTurn.ts';
 
 const close = (a, b) => assert.ok(Math.abs(a - b) < 1e-7, `${a} != ${b}`);
@@ -13,9 +13,9 @@ test('上一页逐帧还原同一张纸，LTR / RTL 与上中下起手共享逆�
       const progress = frame / 40;
       const phase = turnPhase(progress, true);
       close(phase, turnPhase(1 - progress, false));
-      const forward = slideGeometry(width, 800, progress, true, side);
-      const backward = slideGeometry(width, 800, 1 - progress, false, side);
-      for (const key of Object.keys(forward)) close(forward[key], backward[key]);
+      const forward = slideGeometry(width, progress, true, side, COVER_SLIDE.desktop);
+      const backward = slideGeometry(width, 1 - progress, false, side, COVER_SLIDE.desktop);
+      for (const key of ['x', 'bottomX', 'bottomScale']) close(forward[key], backward[key]);
       const lift = Math.sin(Math.PI * phase) * 150;
       const a = curlGeometry(width, originY, phase, lift, side);
       const b = curlGeometry(width, originY, turnPhase(1 - progress, false), lift, side);
@@ -163,22 +163,53 @@ test('真实纸面副本保留富文本和原生图片地址，上一页把目�
   assert.deepEqual([a.style.cssText, b.style.cssText], original);
 }));
 
-test('滑动底页不移动，打断动画会撤走所有副本并恢复原始双缓冲样式', () => fixture(async ({ stage, a, b, flush, frames }) => {
-  const original = [a.style.cssText, b.style.cssText];
-  const controller = createPageTurn({ stage, outgoing: a, incoming: b, style: 'slide', forward: true, side: 1, originY: 400 });
-  controller.move(-195, 150);flush();
-  const piece = stage.querySelector('.reader-turn-piece');
-  assert.equal(piece.style.transform, 'translate3d(-195px,0,0)');
-  assert.match(piece.style.borderRadius, /58.5px/);
-  assert.equal(b.style.transform, 'none');
-  close(Number(stage.querySelector('.reader-turn-dimmer').style.opacity), 0.12);
-  const finished = controller.finish(true);
-  controller.destroy();controller.destroy();
-  assert.equal(await finished, false);
-  assert.equal(frames.size, 0);
-  assert.equal(stage.querySelector('.reader-paper-turn'), null);
-  assert.deepEqual([a.style.cssText, b.style.cssText], original);
-}));
+test('覆盖滑动直接移动双缓冲纸面，首帧跟手，打断时清理边缘层与 rAF', async () => {
+  for (const side of [1, -1]) for (const forward of [true, false]) {
+    await fixture(async ({ stage, a, b, flush, frames }) => {
+      const original = [a.style.cssText, b.style.cssText];
+      const controller = createPageTurn({ stage, outgoing: a, incoming: b, style: 'slide', forward, side, originY: 400, compact: true });
+      const top = forward ? a : b;
+      const bottom = forward ? b : a;
+      const edge = stage.querySelector('.reader-cover-edge');
+      const dimmer = bottom.querySelector('.reader-cover-dimmer');
+      const initialX = forward ? 0 : -side * 390;
+      const dx = (forward ? -side : side) * 8;
+      controller.move(dx, 150);
+      close(Number(top.style.transform.match(/translate3d\(([^p]+)px/)[1]), initialX + dx);
+      assert.equal(top.style.borderRadius, '0');
+      assert.equal(frames.size, 0);
+      assert.equal(stage.querySelector('.reader-turn-copy'), null);
+
+      controller.move((390 + COVER_SLIDE_OVERSCAN) * 0.74 * Math.sign(dx), 0);
+      assert.equal(dimmer.style.opacity, '0');
+      const finished = controller.finish(true);
+      flush();
+      assert.equal(await finished, true);
+      assert.equal(edge.style.opacity, '0');
+      assert.equal(top.style.transform, `translate3d(${forward ? -side * 430 : 0}px,0,0)`);
+      const interrupted = controller.finish(false);
+      controller.destroy();
+      assert.equal(await interrupted, false);
+      assert.equal(frames.size, 0);
+      assert.equal(stage.querySelector('.reader-cover-edge, .reader-cover-dimmer'), null);
+      assert.deepEqual([a.style.cssText, b.style.cssText], original);
+    });
+  }
+});
+
+test('覆盖滑动使用双端景深配置，移动端仅接受足够位移或同向甩手', () => {
+  const desktop = slideGeometry(1440, 0, true, 1, COVER_SLIDE.desktop);
+  const mobile = slideGeometry(390, 0, true, 1, COVER_SLIDE.mobile);
+  assert.equal(desktop.bottomScale, 1);
+  assert.ok(desktop.bottomX > 0 && desktop.bottomX <= 1440 * 0.03);
+  assert.equal(mobile.bottomScale, 0.975);
+  assert.equal(mobile.bottomX, 0);
+  assert.equal(shouldCommitCoverSlide(-117, 0, 390), false);
+  assert.equal(shouldCommitCoverSlide(-118, 0, 390), true);
+  assert.equal(shouldCommitCoverSlide(-25, -0.36, 390), true);
+  assert.equal(shouldCommitCoverSlide(-25, 0.36, 390), false);
+  assert.equal(shouldCommitCoverSlide(0, -1, 390), false);
+});
 
 test('滑动与卷页将各自页码带进纸面，反向和取消时恢复固定页码且不复制进度控件', async () => {
   for (const style of ['slide', 'curl']) for (const forward of [true, false]) for (const showTotal of [true, false]) {
@@ -195,7 +226,8 @@ test('滑动与卷页将各自页码带进纸面，反向和取消时恢复固�
       assert.equal(label.style.opacity, '0');
       assert.equal(a.querySelector('.reader-turn-page-number').textContent, format(outgoing));
       assert.equal(b.querySelector('.reader-turn-page-number').textContent, format(incoming));
-      const copied = stage.querySelector('.reader-turn-copy .reader-turn-page-number');
+      const top = style === 'curl' ? stage.querySelector('.reader-turn-copy') : forward ? a : b;
+      const copied = top.querySelector('.reader-turn-page-number');
       assert.equal(copied.textContent, format(forward ? outgoing : incoming));
       assert.equal(copied.style.left, '160px');
       assert.equal(copied.style.top, '725px');
@@ -230,7 +262,7 @@ test('双页的两枚页码均进入翻页副本，保留 RTL 左右顺序和底
       const expected = numbers => numbers.map(number => ({ position: number.position, text: `${number.pageNumber}页` }));
       assert.deepEqual(read(a), expected(outgoing));
       assert.deepEqual(read(b), expected(incoming));
-      const copy = stage.querySelector('.reader-turn-copy');
+      const copy = style === 'curl' ? stage.querySelector('.reader-turn-copy') : forward ? a : b;
       assert.deepEqual(read(copy), expected(forward ? outgoing : incoming));
       controller.move(forward ? 270 : -270, 90);flush();
       assert.deepEqual(read(copy), expected(forward ? outgoing : incoming));

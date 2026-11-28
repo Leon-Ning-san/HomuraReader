@@ -1,18 +1,18 @@
 /* ============================================================================
    HOMURA · 真实纸面的覆盖滑动与跟手卷页
    ----------------------------------------------------------------------------
-   直接变形双缓冲中的 DOM 副本，不截图、不重绘正文，不依赖额外渲染库。
+   覆盖滑动直接移动双缓冲纸面，卷页按分片复制正文。
    分片、动画、指针状态均由普通对象持有；取消时恢复两槽，调用方决定最终落页。
    ========================================================================== */
 
-import { clampTurnProgress, curlGeometry, curlLighting, curlMatrix, curlPolygon, curlStripTransforms, slideGeometry, turnPhase, type TurnPoint, type TurnSide } from './pageTurnGeometry.ts';
+import { COVER_SLIDE, COVER_SLIDE_OVERSCAN, clampTurnProgress, curlGeometry, curlLighting, curlMatrix, curlPolygon, curlStripTransforms, slideGeometry, turnPhase, type TurnPoint, type TurnSide } from './pageTurnGeometry.ts';
 import { prefersReducedMotion } from './spring.ts';
 import type { ReaderFolio } from './readerLayout.ts';
 
 export type PaperTurnStyle = 'slide' | 'curl';
 export interface PageTurnController {
   move(dx: number, dy: number): void;
-  finish(commit: boolean): Promise<boolean>;
+  finish(commit: boolean, velocity?: number): Promise<boolean>;
   destroy(): void;
 }
 interface PageTurnOptions {
@@ -36,29 +36,14 @@ function polygonStyle(points: TurnPoint[]) {
   return `polygon(${points.map(p => `${p.x.toFixed(2)}px ${p.y.toFixed(2)}px`).join(',')})`;
 }
 
-export function createPageTurn(options: PageTurnOptions): PageTurnController {
-  const { stage, outgoing, incoming, style, forward, side } = options;
-  const width = Math.max(1, stage.clientWidth);
-  const height = Math.max(1, stage.clientHeight);
-  const stableCurl = style === 'curl' && !!options.lowPower;
-  const clipExtent = Math.ceil(Math.hypot(width, height)) + 1;
-  const originY = Math.max(0, Math.min(height, options.originY));
-  const top = forward ? outgoing : incoming;
-  const bottom = forward ? incoming : outgoing;
-  const originalStyles = [outgoing.style.cssText, incoming.style.cssText];
-  let destroyed = false;
-  let progress = 0;
-  let lift = 0;
-  let raf = 0;
-  let resolveAnimation: ((completed: boolean) => void) | null = null;
-
+function placePageNumbers(options: PageTurnOptions) {
   // 页码属于各自纸面；预览和纸背都使用冻结的槽位页码，底栏继续负责交互。
-  const folio = options.pageNumbers;
+  const { stage, outgoing, incoming, pageNumbers: folio } = options;
   const originalLabelOpacity = folio?.label.style.opacity ?? '';
   const pageNumbers: HTMLElement[] = [];
-  if (folio) {
+  const bounds = folio?.label.getBoundingClientRect();
+  if (folio && bounds?.width && bounds.height) {
     const stageBounds = stage.getBoundingClientRect();
-    const bounds = folio.label.getBoundingClientRect();
     const fontFamily = document.defaultView?.getComputedStyle(folio.label).fontFamily ?? '';
     for (const [paper, numbers] of [[outgoing, folio.outgoing], [incoming, folio.incoming]] as const) {
       const numberLayer = document.createElement('div');
@@ -81,6 +66,130 @@ export function createPageTurn(options: PageTurnOptions): PageTurnController {
     folio.label.style.opacity = '0';
   }
 
+  return () => {
+    pageNumbers.forEach(label => label.remove());
+    if (folio) folio.label.style.opacity = originalLabelOpacity;
+  };
+}
+
+function createCoverSlide(options: PageTurnOptions): PageTurnController {
+  const { stage, outgoing, incoming, forward, side } = options;
+  const config = options.compact || options.lowPower ? COVER_SLIDE.mobile : COVER_SLIDE.desktop;
+  const width = Math.max(1, stage.clientWidth);
+  const travel = width + COVER_SLIDE_OVERSCAN;
+  const motion = forward ? -side : side;
+  const top = forward ? outgoing : incoming;
+  const bottom = forward ? incoming : outgoing;
+  const originalStyles = [outgoing.style.cssText, incoming.style.cssText];
+  const removePageNumbers = placePageNumbers(options);
+  const dimmer = document.createElement('div');
+  dimmer.className = 'reader-cover-dimmer';
+  const edge = document.createElement('div');
+  edge.className = 'reader-cover-edge';
+  edge.dataset.side = side === 1 ? 'right' : 'left';
+  edge.setAttribute('aria-hidden', 'true');
+  bottom.appendChild(dimmer);
+  stage.appendChild(edge);
+  Object.assign(top.style, { opacity: '1', zIndex: '22', borderRadius: '0', willChange: 'transform' });
+  Object.assign(bottom.style, { opacity: '1', zIndex: '20', willChange: 'transform' });
+
+  let destroyed = false;
+  let progress = 0;
+  let raf = 0;
+  let resolveAnimation: ((completed: boolean) => void) | null = null;
+
+  function draw() {
+    const frame = slideGeometry(width, progress, forward, side, config);
+    const transform = `translate3d(${frame.x}px,0,0)`;
+    top.style.transform = transform;
+    edge.style.transform = transform;
+    edge.style.opacity = String(frame.edge);
+    dimmer.style.opacity = String(frame.shade);
+    bottom.style.transform = `translate3d(${frame.bottomX}px,0,0) scale(${frame.bottomScale})`;
+  }
+
+  function cancelAnimation() {
+    if (raf) cancelAnimationFrame(raf);
+    raf = 0;
+    resolveAnimation?.(false);
+    resolveAnimation = null;
+  }
+
+  draw();
+  return {
+    move(dx) {
+      if (destroyed) return;
+      cancelAnimation();
+      // 反向跟手从视口边缘起步，出屏缓冲只留给自动收尾。
+      const offset = forward ? 0 : COVER_SLIDE_OVERSCAN;
+      progress = clampTurnProgress((dx * motion + offset) / travel);
+      draw();
+    },
+    finish(commit, velocity = 0) {
+      if (destroyed) return Promise.resolve(false);
+      cancelAnimation();
+      const start = progress;
+      const target = commit ? 1 : 0;
+      const distance = Math.abs(target - start) * travel;
+      if (!distance || prefersReducedMotion()) {
+        progress = target;
+        draw();
+        return Promise.resolve(true);
+      }
+
+      const baseDuration = (commit ? config.duration : 260) * Math.sqrt(distance / travel);
+      const speed = motion * velocity * (commit ? 1 : -1);
+      const duration = Math.max(95, baseDuration / (1 + Math.max(0, speed) * 0.15));
+      const slope = Math.max(1.8, Math.min(2.55, speed > 0 ? speed * duration / distance : 2.1));
+      const startedAt = performance.now();
+      return new Promise<boolean>(resolve => {
+        resolveAnimation = resolve;
+        const tick = (now: number) => {
+          const t = clampTurnProgress((now - startedAt) / duration);
+          const eased = t * (slope + t * (3 - 2 * slope + t * (slope - 2)));
+          progress = start + (target - start) * eased;
+          draw();
+          if (t < 1) raf = requestAnimationFrame(tick);
+          else {
+            raf = 0;
+            resolveAnimation = null;
+            resolve(true);
+          }
+        };
+        raf = requestAnimationFrame(tick);
+      });
+    },
+    destroy() {
+      if (destroyed) return;
+      destroyed = true;
+      cancelAnimation();
+      edge.remove();
+      dimmer.remove();
+      removePageNumbers();
+      outgoing.style.cssText = originalStyles[0];
+      incoming.style.cssText = originalStyles[1];
+    }
+  };
+}
+
+export function createPageTurn(options: PageTurnOptions): PageTurnController {
+  if (options.style === 'slide') return createCoverSlide(options);
+  const { stage, outgoing, incoming, forward, side } = options;
+  const width = Math.max(1, stage.clientWidth);
+  const height = Math.max(1, stage.clientHeight);
+  const stableCurl = !!options.lowPower;
+  const clipExtent = Math.ceil(Math.hypot(width, height)) + 1;
+  const originY = Math.max(0, Math.min(height, options.originY));
+  const top = forward ? outgoing : incoming;
+  const bottom = forward ? incoming : outgoing;
+  const originalStyles = [outgoing.style.cssText, incoming.style.cssText];
+  let destroyed = false;
+  let progress = 0;
+  let lift = 0;
+  let raf = 0;
+  let resolveAnimation: ((completed: boolean) => void) | null = null;
+
+  const removePageNumbers = placePageNumbers(options);
   const root = document.createElement('div');
   root.className = 'reader-paper-turn';
   if (stableCurl) root.classList.add('reader-paper-turn-stable');
@@ -94,7 +203,7 @@ export function createPageTurn(options: PageTurnOptions): PageTurnController {
   root.appendChild(shadow);
   const contact = document.createElement('div');
   contact.className = 'reader-turn-contact';
-  if (style === 'curl') root.appendChild(contact);
+  root.appendChild(contact);
 
   function makePiece(): Piece {
     const element = document.createElement('div');
@@ -119,7 +228,7 @@ export function createPageTurn(options: PageTurnOptions): PageTurnController {
   }
 
   const segments = options.lowPower ? CURL_SEGMENTS.lowPower : options.compact ? CURL_SEGMENTS.compact : CURL_SEGMENTS.default;
-  const pieces = Array.from({ length: style === 'curl' ? segments + 2 : 1 }, makePiece);
+  const pieces = Array.from({ length: segments + 2 }, makePiece);
   pieces.forEach((piece, index) => { piece.element.style.zIndex = String(index + 1); });
   outgoing.style.opacity = '0';
   incoming.style.opacity = '0';
@@ -138,20 +247,6 @@ export function createPageTurn(options: PageTurnOptions): PageTurnController {
   function draw() {
     if (destroyed) return;
     const phase = turnPhase(progress, forward);
-    if (style === 'slide') {
-      const frame = slideGeometry(width, height, progress, forward, side);
-      shadow.className = 'reader-turn-dimmer';
-      shadow.style.opacity = String(frame.shade);
-      const piece = pieces[0];
-      piece.element.style.transform = `translate3d(${frame.x}px,0,0)`;
-      const corners = side === 1 ? `0 ${frame.radius}px ${frame.radius}px 0` : `${frame.radius}px 0 0 ${frame.radius}px`;
-      piece.element.style.borderRadius = corners;
-      piece.element.style.boxShadow = `${side * width * 0.014}px 0 ${width * 0.038}px var(--md-shadow-color-soft)`;
-      setVisibility(piece, phase !== 1);
-      piece.shade.style.opacity = '0';
-      return;
-    }
-
     const geometry = curlGeometry(width, originY, phase, lift, side);
     if (!geometry) {
       pieces.forEach((piece, index) => {
@@ -238,8 +333,8 @@ export function createPageTurn(options: PageTurnOptions): PageTurnController {
       if (destroyed) return;
       cancelAnimation();
       const motion = forward ? -side : side;
-      progress = clampTurnProgress(dx * motion / (width * (style === 'curl' ? 2.25 : 1)));
-      lift = style === 'curl' ? Math.max(-height * 0.6 - originY, Math.min(height * 1.6 - originY, dy)) : 0;
+      progress = clampTurnProgress(dx * motion / (width * 2.25));
+      lift = Math.max(-height * 0.6 - originY, Math.min(height * 1.6 - originY, dy));
       raf = requestAnimationFrame(() => { raf = 0; draw(); });
     },
     finish(commit) {
@@ -250,7 +345,7 @@ export function createPageTurn(options: PageTurnOptions): PageTurnController {
       const startLift = lift;
       const startPhase = turnPhase(start, forward);
       const amplitude = originY < height * 0.28 ? height * 0.34 : originY > height * 0.72 ? -height * 0.34 : height * 0.05;
-      const duration = prefersReducedMotion() ? 0 : Math.max(100, (commit ? (style === 'curl' ? 600 : 380) : 220) * Math.sqrt(Math.abs(target - start)));
+      const duration = prefersReducedMotion() ? 0 : Math.max(100, (commit ? 600 : 220) * Math.sqrt(Math.abs(target - start)));
       const startedAt = performance.now();
       return new Promise<boolean>(resolve => {
         resolveAnimation = resolve;
@@ -277,8 +372,7 @@ export function createPageTurn(options: PageTurnOptions): PageTurnController {
       destroyed = true;
       cancelAnimation();
       root.remove();
-      pageNumbers.forEach(label => label.remove());
-      if (folio) folio.label.style.opacity = originalLabelOpacity;
+      removePageNumbers();
       outgoing.style.cssText = originalStyles[0];
       incoming.style.cssText = originalStyles[1];
     }

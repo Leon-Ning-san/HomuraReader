@@ -149,6 +149,45 @@ test('淡入期间再次按下会立即收稳，不留下双页叠影或阻塞�
   assert.match(slots[reader.activeBufferSlot].textContent, /第 3 页/);
 }));
 
+test('覆盖滑动在首帧之前逐一接收后续翻页，按下时同步提交当前纸面', async () => {
+  const previousRequest = globalThis.requestAnimationFrame;
+  const previousCancel = globalThis.cancelAnimationFrame;
+  const frames = new Map();
+  let frameId = 0;
+  globalThis.requestAnimationFrame = callback => {
+    frames.set(++frameId, callback);
+    return frameId;
+  };
+  globalThis.cancelAnimationFrame = id => frames.delete(id);
+  try {
+    await fixture(async ({ reader, theme, slots, turn }) => {
+      theme.transitionStyle = 'slide';
+      await flush();
+      await turn(1);
+      assert.equal(frames.size, 1);
+      reader.currentIndex = 2;
+      reader.renderFn('enter-from-right');
+      reader.currentIndex = 3;
+      reader.renderFn('enter-from-right');
+      for (let i = 0; i < 4; i++) await flush();
+      assert.equal(frameId, 3);
+      assert.equal(frames.size, 1);
+      assert.match(slots[reader.activeBufferSlot].textContent, /第 4 页/);
+
+      const down = new window.Event('pointerdown');
+      Object.assign(down, { pointerId: 1, pointerType: 'touch', isPrimary: true, clientX: 200, clientY: 200 });
+      document.querySelector('.reader-gesture-layer').dispatchEvent(down);
+      assert.equal(frames.size, 0);
+      assert.equal(document.querySelector('.reader-cover-edge'), null);
+      assert.equal(slots[reader.activeBufferSlot].style.opacity, '1');
+      assert.equal(slots[1 - reader.activeBufferSlot].style.opacity, '0');
+    });
+  } finally {
+    globalThis.requestAnimationFrame = previousRequest;
+    globalThis.cancelAnimationFrame = previousCancel;
+  }
+});
+
 test('减少动态效果与无动画跳读直接切页，卸载时收回进行中的动画', () => fixture(async ({ reader, slots, animations, turn, app }) => {
   reducedMotion = true;
   await turn(1);

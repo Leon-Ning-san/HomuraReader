@@ -161,6 +161,8 @@ const ui = useUiStore();
 const theme = useThemeStore();
 const { isCompact } = useViewport();
 const viewportRef = shallowRef<HTMLElement | null>(null);
+const coverSlide = () => theme.transitionStyle === 'slide' && reader.layoutConfig.direction !== 'vertical';
+
 const {
   onPointerDown: onBackPointerDown,
   onPointerMove: onBackPointerMove,
@@ -306,6 +308,6 @@ onBeforeUnmount(() => {
   document.documentElement.classList.remove('reader-active');
 });
 
-useShortcuts(reader, viewportRef, dismissWithPredictiveBack, isOpening, cancelOpening);
+useShortcuts(reader, viewportRef, dismissWithPredictiveBack, isOpening, cancelOpening, coverSlide);
 useVolumeKeys(reader, ui, isOpening);
 </script>

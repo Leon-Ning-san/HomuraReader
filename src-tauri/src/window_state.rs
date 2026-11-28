@@ -23,6 +23,45 @@ const SAVE_DEBOUNCE: Duration = Duration::from_millis(350);
 static HAS_SAVED_STATE: AtomicBool = AtomicBool::new(false);
 static RESTORE_MAXIMIZED: AtomicBool = AtomicBool::new(false);
 
+#[cfg(target_os = "macos")]
+static TITLEBAR_INSET: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+
+#[cfg(target_os = "macos")]
+pub(crate) fn titlebar_inset() -> f32 {
+    f32::from_bits(TITLEBAR_INSET.load(Ordering::Relaxed))
+}
+
+#[cfg(target_os = "macos")]
+pub(crate) fn enable_titlebar_overlay(window: &WebviewWindow) -> tauri::Result<()> {
+    use objc2_app_kit::{NSWindow, NSWindowStyleMask, NSWindowTitleVisibility};
+
+    // 只在启动的主线程设置一次，阅读器进出时 WebView 保持相同的高度和原点。
+    let handle = window.ns_window()?;
+    let native = unsafe { &*handle.cast::<NSWindow>() };
+    let frame = native.frame();
+    let responder = native.firstResponder();
+    let mut mask = native.styleMask();
+    let mut minimum = native.contentMinSize();
+    let content_height = native.contentRectForFrameRect(frame).size.height;
+    let inset = (frame.size.height - content_height).max(0.0);
+    mask.insert(NSWindowStyleMask::FullSizeContentView);
+    native.setStyleMask(mask);
+    native.setTitleVisibility(NSWindowTitleVisibility::Hidden);
+
+    minimum.height += inset;
+    native.setContentMinSize(minimum);
+    native.setFrame_display(frame, true);
+    if let Some(content) = native.contentView() {
+        let size = native.contentRectForFrameRect(frame).size;
+        if content.frame().size != size {
+            content.setFrameSize(size);
+        }
+    }
+    native.makeFirstResponder(responder.as_deref());
+    TITLEBAR_INSET.store((inset as f32).to_bits(), Ordering::Relaxed);
+    Ok(())
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct SavedState {
     x: i32,
@@ -83,11 +122,14 @@ fn capture(window: &WebviewWindow) -> Option<SavedState> {
     }
     let position = window.outer_position().ok()?;
     let size = window.inner_size().ok()?;
+    let height = size.height as f64 / scale;
+    #[cfg(target_os = "macos")]
+    let height = height - f64::from(titlebar_inset());
     let state = SavedState {
         x: position.x,
         y: position.y,
         width: size.width as f64 / scale,
-        height: size.height as f64 / scale,
+        height,
         maximized: false,
     };
     state.is_sane().then_some(state)
@@ -132,6 +174,14 @@ pub fn restore(window: &WebviewWindow) {
     let primary = window.primary_monitor().ok().flatten();
     let clamp_monitor = monitor.or(primary.as_ref());
 
+    // 旧窗口记录保存标题栏下方的高度，恢复时换算成覆盖模式的完整 WebView 高度。
+    let (saved_height, min_height) = (saved.height, MIN_HEIGHT);
+    #[cfg(target_os = "macos")]
+    let (saved_height, min_height) = {
+        let inset = f64::from(titlebar_inset());
+        (saved_height + inset, min_height + inset)
+    };
+
     let (width, height) = match clamp_monitor {
         Some(monitor) => {
             let scale = monitor.scale_factor();
@@ -142,10 +192,10 @@ pub fn restore(window: &WebviewWindow) {
             let max_height = monitor.size().height as f64 / scale;
             (
                 saved.width.clamp(MIN_WIDTH.min(max_width), max_width),
-                saved.height.clamp(MIN_HEIGHT.min(max_height), max_height),
+                saved_height.clamp(min_height.min(max_height), max_height),
             )
         }
-        None => (saved.width.max(MIN_WIDTH), saved.height.max(MIN_HEIGHT)),
+        None => (saved.width.max(MIN_WIDTH), saved_height.max(min_height)),
     };
 
     if let Err(err) = window.set_size(LogicalSize::new(width, height)) {

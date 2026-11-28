@@ -24,14 +24,28 @@ export function turnPhase(progress: number, forward: boolean) {
   return forward ? value : 1 - value;
 }
 
-export function slideGeometry(width: number, height: number, progress: number, forward: boolean, side: TurnSide) {
+export const COVER_SLIDE = {
+  desktop: { duration: 380, shade: 0.065, parallax: 0.018, scale: 1 },
+  mobile: { duration: 400, shade: 0.085, parallax: 0, scale: 0.975 }
+} as const;
+export const COVER_SLIDE_OVERSCAN = 40;
+
+export function slideGeometry(width: number, progress: number, forward: boolean, side: TurnSide, config: typeof COVER_SLIDE[keyof typeof COVER_SLIDE]) {
   const phase = turnPhase(progress, forward);
+  const distance = phase * (width + COVER_SLIDE_OVERSCAN);
+  const reveal = clampTurnProgress(distance / width);
+  const remaining = 1 - reveal;
   return {
-    phase,
-    x: -side * width * phase,
-    radius: Math.min(width * 0.15, height * 0.09) * Math.min(1, phase / 0.07),
-    shade: 0.24 * (1 - phase)
+    x: -side * distance,
+    bottomX: side * width * config.parallax * remaining,
+    bottomScale: 1 - (1 - config.scale) * remaining,
+    edge: Math.min(clampTurnProgress(distance / 8), clampTurnProgress(remaining * width / 8), clampTurnProgress((1 - phase) / 0.25), clampTurnProgress((1 - progress) / 0.25)),
+    shade: config.shade * clampTurnProgress(1 - progress / 0.73) * (forward ? 1 : clampTurnProgress(remaining / 0.14))
   };
+}
+
+export function shouldCommitCoverSlide(dx: number, vx: number, width: number) {
+  return Math.abs(dx) > width * 0.3 || (Math.abs(vx) > 0.35 && dx * vx > 0);
 }
 
 export function curlGeometry(width: number, originY: number, phase: number, lift: number, side: TurnSide): CurlGeometry | null {

@@ -124,7 +124,7 @@
     .md-reader-topbar {
       position: absolute;
       z-index: 30;
-      top: calc(env(safe-area-inset-top, 0px));
+      top: max(env(safe-area-inset-top, 0px), var(--homura-window-titlebar-inset));
       right: 0;
       left: 0;
       display: grid;
@@ -549,6 +549,13 @@
       opacity: 0.35;
       pointer-events: none;
     }
+    .reader-stage-shell.is-cover-turning .reader-page-arrow,
+    .reader-stage-shell.is-cover-turning .reader-page-arrow.is-dim {
+      opacity: 0;
+      pointer-events: none;
+      transition: opacity 120ms ease;
+    }
+
     /* 触屏没有悬停语义；窄窗口是手机布局，箭头会压到正文，也一并收起 */
     @media (hover: none), (max-width: 899px) {
       .reader-page-arrow {
@@ -563,7 +570,7 @@
 
     @media (max-width: 899px) {
       .md-reader-topbar {
-        top: calc(env(safe-area-inset-top, 0px));
+        top: max(env(safe-area-inset-top, 0px), var(--homura-window-titlebar-inset));
         right: 0;
         left: 0;
         min-height: 56px;
